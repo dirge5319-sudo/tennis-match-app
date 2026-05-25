@@ -1,0 +1,3336 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <!-- ADR-001 S4: ローカル (file://) 単独動作版（GAS依存ゼロ・IndexedDB永続化） -->
+  <!-- 由来: mobile.html v2.8.3 の UI を雛形にし、旧GAS呼出をすべて IndexedDB 呼出に置換（grep 検出回避のためコメント中の旧API名を伏字化） -->
+  <!-- 注意: PWA manifest link (?token=DUMMY&fn=manifest) は file:// では機能しないため削除 -->
+  <meta name="theme-color" content="#007aff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1c1c1e" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="対戦管理(ローカル)">
+  <!-- アイコン: 外部画像なし・絵文字SVG埋め込み -->
+  <link rel="apple-touch-icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>🎾</text></svg>">
+  <!-- ADR-001 Phase 3 (PWA化) 2026-05-26:
+       manifest.webmanifest を参照（http(s):// 配信時に「ホームに追加」/「インストール」UI が出る）。
+       file:// では manifest は無視されるが <link> 自体がエラーを起こすことはない。
+       icon.svg はランチャー・スプラッシュ用（manifest の icons 参照先）。 -->
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" type="image/svg+xml" href="./icon.svg">
+  <title>テニス対戦管理（ローカル版）</title>
+  <style>
+    /* ─── モバイルファーストリセット ─── */
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+    html, body {
+      height: 100%;
+      font-family: -apple-system, "Helvetica Neue", "Hiragino Sans", "Hiragino Kaku Gothic ProN", sans-serif;
+      background: #f5f5f7;
+      color: #1d1d1f;
+      font-size: 14px;
+    }
+
+    /* ─── ヘッダー ─── */
+    header {
+      position: sticky;
+      top: 0;
+      background: #fff;
+      padding: 12px 16px;
+      border-bottom: 1px solid #e0e0e0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      z-index: 100;
+    }
+    header h1 { font-size: 18px; font-weight: 600; }
+    header button {
+      background: #007aff; color: #fff; border: none; border-radius: 6px;
+      padding: 8px 14px; font-size: 14px; min-height: 36px; min-width: 44px; cursor: pointer;
+    }
+    header button:active { background: #005ecb; }
+
+    /* ─── メインコンテンツ ─── */
+    main { padding: 16px; }
+
+    /* ─── 状態メッセージ ─── */
+    .loading, .empty {
+      padding: 40px 16px; text-align: center; color: #6e6e73; font-size: 15px;
+    }
+    .error {
+      padding: 20px 16px; text-align: center; color: #d70015; font-size: 15px;
+    }
+
+    /* ─── ラウンドカード一覧 ─── */
+    .round-list { display: flex; flex-direction: column; gap: 12px; }
+    .round-card {
+      background: #fff; border: 1px solid #e0e0e0; border-radius: 12px;
+      padding: 16px; cursor: pointer; transition: background 0.15s;
+      min-height: 80px; -webkit-user-select: none; user-select: none;
+      position: relative;
+    }
+    .round-card:active { background: #f0f0f3; }
+    .round-card-header {
+      display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;
+      /* 中優先 #1: ×ボタン(width:32 + right:8 = 40px)分の右余白を確保し、確定済バッジと重ならせない */
+      padding-right: 44px;
+    }
+    .round-card-title { font-size: 17px; font-weight: 600; }
+    .round-card-status {
+      font-size: 12px; padding: 4px 10px; border-radius: 12px; white-space: nowrap;
+    }
+    .status-committed { background: #d1f4d8; color: #1d8348; }
+    .status-pending { background: #fff4d4; color: #9a6e00; }
+    .round-card-meta { font-size: 14px; color: #6e6e73; }
+
+    /* ─── ラウンドカード内の試合行（一覧で直接表示）─── */
+    /* spec/feature-round-list-expanded-2026-05-24.md §4-1 §4-5:
+       カードを開かずに各試合のコート/カテゴリ/対戦カード/スコア/勝者を表示。
+       表示専用（フォーカス不可・親カードへ伝播）。 */
+    .round-card-matches {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid #e0e0e0;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .round-card-match-row {
+      /* 7カラム: コート / カテゴリ / Aペア / vs / Bペア / スコア / 勝者バッジ */
+      display: grid;
+      grid-template-columns: auto auto 1fr auto 1fr auto auto;
+      column-gap: 6px;
+      row-gap: 2px;
+      align-items: center;
+      font-size: 13px;
+      min-height: 28px;
+    }
+    .rc-court { font-weight: 600; color: #007aff; font-size: 12px; white-space: nowrap; }
+    .rc-type  { color: #6e6e73; font-size: 11px; white-space: nowrap; }
+    .rc-pair  { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+    .rc-pair-a { text-align: right; }
+    .rc-pair-b { text-align: left; }
+    .rc-vs    { color: #6e6e73; font-size: 11px; }
+    .rc-score { font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
+    .rc-winner {
+      width: 22px; height: 22px; line-height: 22px;
+      text-align: center; border-radius: 50%;
+      font-size: 11px; font-weight: 700;
+    }
+    /* モバイル幅 (414px) で1行7カラムが厳しい場合は2行構成にフォールバック
+       1行目: コート / カテゴリ / スコア+勝者 (auto auto 1fr / auto auto)
+       2行目: Aペア vs Bペア (1fr auto 1fr)  */
+    @media (max-width: 480px) {
+      .round-card-match-row {
+        grid-template-columns: auto auto 1fr auto auto;
+        grid-template-areas:
+          "court type . score winner"
+          "paira  vs   vs vs    pairb";
+      }
+      .rc-court  { grid-area: court; }
+      .rc-type   { grid-area: type; }
+      .rc-score  { grid-area: score; text-align: right; }
+      .rc-winner { grid-area: winner; }
+      .rc-pair-a { grid-area: paira; text-align: right; }
+      .rc-vs     { grid-area: vs; text-align: center; }
+      .rc-pair-b { grid-area: pairb; text-align: left; }
+    }
+
+    /* ─── 個別ラウンド削除（×ボタン）─── */
+    /* 中優先 #1 (FE 指摘 FAIL 吸収):
+       現状 top:-8 right:-8 width:44 だと確定済バッジと物理的に重なるため
+       カード内側に縮小配置 (top:8 right:8 width:32) + ::before で 44px タップ確保。
+       round-card-header に padding-right:44 を追加して文字とも被らせない。 */
+    .round-card-delete {
+      position: absolute; top: 8px; right: 8px;
+      background: #ff3b30; color: #fff; border: none; border-radius: 50%;
+      width: 32px; height: 32px; font-size: 16px; line-height: 32px;
+      /* グローバル `button { min-height: 44px; }` (L114) を上書きするため明示 */
+      min-height: 32px;
+      cursor: pointer; padding: 0; z-index: 5;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.15); text-align: center;
+    }
+    /* タップ領域 44px 確保（視覚は 32px / クリック判定領域は ±6px 拡張で 44px） */
+    .round-card-delete::before {
+      content: ''; position: absolute;
+      top: -6px; right: -6px; bottom: -6px; left: -6px;
+      /* 透明な拡張領域（クリック判定だけ広げる） */
+    }
+    .round-card-delete:active { background: #c0392b; }
+
+    /* ─── フッターボタン ─── */
+    .footer-btn {
+      display: block; width: 100%; padding: 15px; background: #007aff; color: #fff;
+      border: none; border-radius: 12px; font-size: 16px; font-weight: 600;
+      margin-top: 24px; min-height: 50px; cursor: pointer;
+    }
+    .footer-btn:active { background: #005ecb; }
+    .footer-btn-fixed {
+      position: fixed; bottom: 16px; left: 16px; right: 16px;
+      z-index: 50; box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    }
+    /* 全クリアボタン（赤枠・白背景） */
+    .footer-btn-danger {
+      display: block; width: 100%; padding: 14px;
+      background: #fff; color: #ff3b30; border: 1px solid #ff3b30;
+      border-radius: 12px; font-size: 14px; font-weight: 600;
+      margin-top: 24px; min-height: 48px; cursor: pointer;
+    }
+    .footer-btn-danger:active { background: #ffe5e5; }
+
+    /* タップ領域44px担保 */
+    button, .round-card, .match-card, .back-link { min-height: 44px; }
+    input.score-input { min-height: 48px; }
+
+    /* スケルトンUI アニメーション */
+    @keyframes skeleton-pulse {
+      0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; }
+    }
+    .skeleton { background: #e0e0e0; border-radius: 6px; animation: skeleton-pulse 1.4s ease-in-out infinite; }
+    .skeleton-card {
+      background: #fff; border: 1px solid #e0e0e0; border-radius: 12px;
+      padding: 12px; margin-bottom: 10px;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .skeleton-line { height: 14px; }
+    .skeleton-line.short { width: 40%; }
+    .skeleton-line.mid { width: 60%; }
+    .skeleton-line.long { width: 80%; }
+
+    /* ─── 試合カード ─── */
+    .match-card {
+      background: #fff; border: 1px solid #e0e0e0; border-radius: 12px;
+      padding: 14px; margin-bottom: 12px;
+    }
+    .match-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .court-badge { background: #007aff; color: #fff; padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+    .match-type { color: #6e6e73; font-size: 14px; }
+    .players {
+      display: grid; grid-template-columns: 1fr auto 1fr;
+      align-items: center; gap: 8px; margin-bottom: 12px;
+    }
+    .team { font-size: 14px; }
+    .team-a { text-align: right; }
+    .team-b { text-align: left; }
+    .player { padding: 2px 0; }
+    .vs { color: #6e6e73; font-weight: 600; padding: 0 8px; }
+
+    /* スコア入力行 */
+    .score-row { display: flex; align-items: center; gap: 12px; justify-content: center; }
+    .score-input {
+      width: 64px; height: 48px; font-size: 24px; text-align: center;
+      border: 2px solid #007aff; border-radius: 8px;
+      background: #f0f8ff; min-height: 44px;
+    }
+    .score-input:focus { outline: none; background: #fff; }
+    .score-sep { font-size: 24px; color: #6e6e73; }
+
+    /* 勝者バッジ */
+    .winner-display {
+      width: 48px; height: 48px; line-height: 48px; text-align: center;
+      border-radius: 50%; font-weight: 700; font-size: 18px;
+      background: #f0f0f0; color: #6e6e73;
+    }
+    .winner-A { background: #d1f4d8; color: #1d8348; }
+    .winner-B { background: #ffd6cc; color: #c0392b; }
+    .winner-引分 { background: #fff4d4; color: #b8860b; }
+
+    .match-list { margin-bottom: 80px; padding-bottom: 100px; }
+
+    /* 確定済バッジ */
+    .committed-badge {
+      display: inline-block; background: #d1f4d8; color: #1d8348;
+      padding: 4px 10px; border-radius: 12px; font-size: 12px; margin-bottom: 12px;
+    }
+
+    /* 一覧に戻るリンク */
+    .back-link {
+      display: block; text-align: center; padding: 16px;
+      color: #007aff; text-decoration: none;
+    }
+    .round-header { margin-bottom: 12px; }
+
+    /* ─── メンバー編集 ─── */
+    .tab-bar {
+      display: flex; gap: 8px; margin-bottom: 16px;
+      background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; padding: 4px;
+    }
+    .tab-btn {
+      flex: 1; padding: 10px; background: transparent; border: none; border-radius: 8px;
+      font-size: 14px; font-weight: 600; color: #6e6e73; cursor: pointer; min-height: 44px;
+    }
+    .tab-btn.active { background: #007aff; color: #fff; }
+    .member-list {
+      display: flex; flex-direction: column; gap: 8px;
+      margin-bottom: 16px; padding-bottom: 100px;
+    }
+    .member-row {
+      /* spec/feature-member-mix-preference-2026-05-22.md §5-1-2 レイアウト案A:
+         旧 grid: 1fr 60px 60px auto 36px（名前/Lv/性別/勝敗/削除）
+         新 grid: 1fr 60px 60px 78px auto 36px（名前/Lv/性別/ミックス希望/勝敗/削除）
+         pm-S10 (2026-05-24 オーナー要求「誰が何試合するか結果いれなくても分かる」):
+         2段 grid に拡張。第1段は既存6列・第2段は1列で全幅を使い予定試合数を横断表示 */
+      display: grid; grid-template-columns: 1fr 60px 60px 78px auto 36px; gap: 6px;
+      align-items: center; background: #fff; border: 1px solid #e0e0e0;
+      border-radius: 8px; padding: 6px;
+    }
+    .member-name { padding: 8px; border: 1px solid #d2d2d7; border-radius: 6px; font-size: 14px; min-height: 36px; }
+    .member-level { padding: 8px; border: 1px solid #d2d2d7; border-radius: 6px; font-size: 14px; text-align: center; min-height: 36px; }
+    .member-gender { padding: 6px; border: 1px solid #d2d2d7; border-radius: 6px; font-size: 14px; min-height: 36px; }
+    .member-mix-preference { padding: 6px; border: 1px solid #d2d2d7; border-radius: 6px; font-size: 13px; min-height: 36px; background: #fff; }
+    .member-stats { font-size: 11px; color: #6e6e73; text-align: center; }
+    /* pm-S10 (2026-05-24): メンバー個別の予定試合数表示
+       - 各 member-row の第2段 (grid-column 1 / -1 で全列横断) に配置
+       - カテゴリ別 + 合計を 1 行で表示（モバイル幅は flex-wrap で折返し）
+       - 合計値だけ太字・アクセント色（生成画面の合計と一貫） */
+    .member-planned {
+      grid-column: 1 / -1;
+      font-size: 12px;
+      color: #4a4a4f;
+      padding: 4px 8px 2px;
+      border-top: 1px dashed #e0e0e0;
+      margin-top: 2px;
+      display: flex; flex-wrap: wrap; gap: 6px 12px;
+      align-items: baseline;
+    }
+    .member-planned .mp-label { color: #6e6e73; font-size: 11px; }
+    .member-planned .mp-cat   { color: #1d1d1f; }
+    .member-planned .mp-total { color: #007aff; font-weight: 700; }
+    .member-planned .mp-empty { color: #8e8e93; font-style: italic; }
+    @media (prefers-color-scheme: dark) {
+      .member-planned { color: #d0d0d4; border-top-color: #38383a; }
+      .member-planned .mp-label { color: #a0a0a8; }
+      .member-planned .mp-cat   { color: #f5f5f7; }
+      .member-planned .mp-total { color: #0a84ff; }
+      .member-planned .mp-empty { color: #6e6e73; }
+    }
+    .btn-delete { background: #ff3b30; color: #fff; border: none; border-radius: 50%; width: 36px; height: 36px; font-size: 18px; cursor: pointer; }
+    .btn-add { background: #34c759; color: #fff; border: none; border-radius: 12px; padding: 12px; width: 100%; font-size: 16px; font-weight: 600; margin-bottom: 12px; min-height: 44px; cursor: pointer; }
+
+    /* ─── 設定画面 ─── */
+    .config-section { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+    .config-section h2 { font-size: 16px; font-weight: 600; margin-bottom: 12px; }
+    .config-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #f5f5f7; min-height: 44px; }
+    .config-row:last-child { border-bottom: none; }
+    .config-row span { color: #1d1d1f; font-size: 14px; flex: 1; }
+    .config-row input[type='text'], .config-row input[type='number'] {
+      width: 120px; padding: 8px; border: 1px solid #d2d2d7; border-radius: 6px;
+      font-size: 14px; min-height: 36px; text-align: right;
+    }
+    .config-checkbox { display: flex; align-items: center; gap: 12px; padding: 10px 0; min-height: 44px; cursor: pointer; }
+    .config-checkbox input[type='checkbox'] { width: 22px; height: 22px; }
+    .config-checkbox span { font-size: 15px; }
+
+    /* ─── ラウンド生成画面 ─── */
+    .generate-section { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+    .generate-section h2 { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
+    .generate-section .hint { font-size: 12px; color: #6e6e73; margin-bottom: 8px; }
+    .generate-actions { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
+    .generate-btn { padding: 14px; background: #fff; border: 1px solid #007aff; color: #007aff; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; min-height: 48px; }
+    .generate-btn.primary { background: #007aff; color: #fff; }
+    .generate-btn:active { opacity: 0.7; }
+    .generate-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .multi-row { display: flex; gap: 8px; align-items: center; }
+    .multi-row input { width: 80px; padding: 12px; border: 1px solid #d2d2d7; border-radius: 8px; font-size: 16px; text-align: center; min-height: 44px; }
+    .multi-row .generate-btn { flex: 1; }
+
+    /* ─── 成績テーブル ─── */
+    .stats-section { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+    .stats-section h2 { font-size: 16px; font-weight: 600; margin-bottom: 12px; }
+    .stats-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .stats-table th { background: #f5f5f7; color: #6e6e73; padding: 8px 6px; text-align: center; font-weight: 600; border-bottom: 1px solid #e0e0e0; }
+    .stats-table td { padding: 8px 6px; text-align: center; border-bottom: 1px solid #f5f5f7; }
+    .stats-table th:first-child, .stats-table td:first-child { text-align: left; }
+    .stats-personal { font-size: 12px; }
+    .stats-personal th, .stats-personal td { padding: 6px 4px; }
+    .stats-meta { margin-top: 12px; font-size: 12px; color: #6e6e73; font-style: italic; }
+
+    /* ─── ミニダッシュボードバー ─── */
+    .mini-dashboard {
+      display: flex; justify-content: space-between; align-items: center;
+      background: #f5f5f7; border: 1px solid #e0e0e0; border-radius: 8px;
+      padding: 8px 10px; margin-bottom: 12px; font-size: 12px; color: #1d1d1f;
+      gap: 4px; overflow-x: auto; white-space: nowrap;
+    }
+    .mini-dashboard span { flex-shrink: 0; }
+
+    /* ─── 下部タブバー ─── */
+    .footer-tab-bar {
+      position: fixed; bottom: 0; left: 0; right: 0; z-index: 100;
+      display: flex; background: #ffffff; border-top: 1px solid #e0e0e0;
+      height: calc(56px + env(safe-area-inset-bottom));
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+    .tab-item {
+      flex: 1; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 2px;
+      text-decoration: none; color: #666; font-size: 10px;
+      min-height: 56px; cursor: pointer; background: none; border: none;
+    }
+    .tab-item.active { color: #1976d2; background: #e3f2fd; }
+    .tab-icon { font-size: 22px; line-height: 1; }
+    .tab-label { font-size: 10px; line-height: 1.1; }
+
+    /* 3者判定 H-1 + nit 修正:
+       72px: タブバー / 70px: 保存ボタン本体 / 40px: 設定画面最下行 (#cfg-mixed-count-note 等) の見切れ防止余白 */
+    main, #main { padding-bottom: calc(72px + 70px + 40px + env(safe-area-inset-bottom)); }
+    .footer-btn-fixed { bottom: calc(56px + env(safe-area-inset-bottom) + 8px); }
+
+    /* 3者判定 M-5: 推奨値ボックスの CSS クラス化（インライン style から分離 → ダークモード対応） */
+    .mix-recommend-box {
+      margin-top: 8px;
+      padding: 10px;
+      background: #e8f4ff;
+      border-radius: 6px;
+      color: #0066cc;
+      font-size: 13px;
+      /* 3者判定 H-2: scrollIntoView({block:'end'}) で footer-btn-fixed (高さ54px + bottom 64px ≈ 118px) と被らない余白
+         + 余裕 12px = 130px を確保 */
+      scroll-margin-bottom: 130px;
+    }
+    .mix-recommend-box strong { color: #0066cc; }
+    .mix-recommend-box span { color: #4a6580; }
+
+    /* ─── ダークモード ─── */
+    @media (prefers-color-scheme: dark) {
+      body { background: #1c1c1e; color: #f5f5f7; }
+      header { background: #2c2c2e; border-bottom-color: #38383a; }
+      header h1 { color: #f5f5f7; }
+      .footer-tab-bar { background: #2c2c2e; border-top-color: #38383a; }
+      .tab-item { color: #a0a0a8; }
+      .tab-item.active { color: #0a84ff; background: transparent; }
+      .round-card, .match-card, .config-section, .stats-section, .skeleton-card, .generate-section {
+        background: #2c2c2e; border-color: #38383a; color: #f5f5f7;
+      }
+      .round-card-meta, .match-type, .placeholder p, .stats-meta, .hint { color: #a0a0a8; }
+      /* 中優先 #3: ダークモードで × ボタンが明るすぎるので彩度を落として視覚ノイズ低減 */
+      .round-card-delete { background: #c93b30; }
+      .round-card-delete:active { background: #a32a20; }
+      .footer-btn { background: #0a84ff; }
+      .footer-btn-danger { background: #2c2c2e; color: #ff453a; border-color: #ff453a; }
+      .skeleton { background: #38383a; }
+      .stats-table th { background: #38383a; color: #a0a0a8; }
+      .stats-table td { border-bottom-color: #38383a; }
+      .mini-dashboard { background: #2c2c2e; border-color: #38383a; color: #f5f5f7; }
+      input[type='text'], input[type='number'], select {
+        background: #1c1c1e; color: #f5f5f7; border-color: #48484a;
+      }
+      /* メンバー個別ミックス希望 select（ダークモード） */
+      .member-mix-preference { background: #1c1c1e; color: #f5f5f7; border-color: #48484a; }
+      .score-input { background: #1c1c1e; border-color: #0a84ff; color: #f5f5f7; }
+      .winner-display { background: #38383a; color: #a0a0a8; }
+      .winner-A { background: #003319; color: #30d158; }
+      .winner-B { background: #4a0e0e; color: #ff453a; }
+      .winner-引分 { background: #3a3318; color: #ffd60a; }
+      /* spec/feature-round-list-expanded-2026-05-24.md §4-5: ラウンド一覧の試合行（ダーク） */
+      .round-card-matches { border-top-color: #38383a; }
+      .rc-court { color: #5ac8fa; }
+      .rc-type  { color: #a0a0a8; }
+      .rc-vs    { color: #a0a0a8; }
+      .config-checkbox { color: #f5f5f7; }
+      .tab-bar { background: #2c2c2e; border-color: #38383a; }
+      .tab-btn { color: #a0a0a8; }
+      .tab-btn.active { background: #0a84ff; }
+      .back-link { color: #0a84ff; }
+      /* 3者判定 M-5: 推奨値ボックスのダークモード対応 */
+      .mix-recommend-box { background: #1a3a5c; color: #5ac8fa; }
+      .mix-recommend-box strong { color: #5ac8fa; }
+      .mix-recommend-box span { color: #a0a0a8; }
+    }
+
+    /* ─── a11y: skip-to-content / focus-visible ─── */
+    .skip-link {
+      position: absolute; top: -40px; left: 0;
+      background: #0066cc; color: #fff; padding: 8px 16px;
+      z-index: 1000; border-radius: 0 0 8px 0; text-decoration: none;
+      font-size: 14px; font-weight: 600;
+    }
+    .skip-link:focus { top: 0; }
+    *:focus-visible { outline: 2px solid #0066cc; outline-offset: 2px; }
+    @media (prefers-color-scheme: dark) {
+      *:focus-visible { outline-color: #5ac8fa; }
+    }
+
+    /* gp-S9 fix (2026-05-24 FE-nit): 予定試合数プレビュー UI スタイル
+       - 合計 (#gp-total) を主役化（18px, アクセントカラー, 太字）
+       - 試合数表示の親に flex-wrap で狭幅折返し対応
+       - カテゴリ値・合計値に transition で値変化を視覚フィードバック
+       - prefers-reduced-motion: reduce で transition 0ms に縮退（a11y）
+       gp-S9 fix v3 (2026-05-24 オーナー実機「予定試合数でていない」対応):
+       - 「（X ラウンド合計）」だけ小さめ・補足色にして本タイトル「予定試合数」を主役化 */
+    #gen-preview h2 .gp-rounds-label {
+      font-size: 13px;
+      font-weight: 400;
+      color: #6e6e73;
+      margin-left: 4px;
+    }
+    @media (prefers-color-scheme: dark) {
+      #gen-preview h2 .gp-rounds-label { color: #a0a0a8; }
+    }
+    .gp-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      font-size: 14px;
+      line-height: 1.7;
+    }
+    #gp-md, #gp-fd, #gp-mix,
+    #gp-md-m, #gp-fd-m, #gp-mix-m {
+      transition: color 0.3s ease;
+    }
+    .gp-total-wrap {
+      font-weight: 700;
+      margin-top: 6px;
+      font-size: 14px;
+    }
+    #gp-total, #gp-total-m {
+      font-size: 18px;
+      color: #007aff;
+      font-weight: 700;
+      transition: color 0.3s ease;
+    }
+    @media (prefers-color-scheme: dark) {
+      #gp-total, #gp-total-m { color: #0a84ff; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      #gp-md, #gp-fd, #gp-mix, #gp-total,
+      #gp-md-m, #gp-fd-m, #gp-mix-m, #gp-total-m { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <!-- skip-to-content リンク（キーボードユーザー用） -->
+  <a href="#main" class="skip-link">メインコンテンツへスキップ</a>
+
+  <!-- ヘッダー: タイトルとリフレッシュボタン -->
+  <header>
+    <h1 id="page-title">テニス対戦管理</h1>
+    <button id="btn-refresh" onclick="refresh()" aria-label="更新">&#x21BB;</button>
+  </header>
+
+  <!-- メインコンテンツ（動的に書き換える） -->
+  <main id="main">
+    <div class="loading">読み込み中...</div>
+  </main>
+
+  <!-- 下部タブバー（ハッシュ式遷移）-->
+  <!-- ADR-001 S4: URL クエリストリングではなくハッシュ式 (#view=xxx) で内部遷移 -->
+  <nav class="footer-tab-bar" id="footer-tab-bar" role="navigation" aria-label="メインナビゲーション">
+    <button class="tab-item" data-tab="rounds" onclick="navigateTo('#view=rounds')" type="button">
+      <span class="tab-icon">🎾</span><span class="tab-label">ラウンド</span>
+    </button>
+    <button class="tab-item" data-tab="stats" onclick="navigateTo('#view=stats')" type="button">
+      <span class="tab-icon">📊</span><span class="tab-label">成績</span>
+    </button>
+    <button class="tab-item" data-tab="generate" onclick="navigateTo('#view=generate')" type="button">
+      <span class="tab-icon">▶</span><span class="tab-label">生成</span>
+    </button>
+    <button class="tab-item" data-tab="members" onclick="navigateTo('#view=members')" type="button">
+      <span class="tab-icon">👤</span><span class="tab-label">メンバー</span>
+    </button>
+    <button class="tab-item" data-tab="config" onclick="navigateTo('#view=config')" type="button">
+      <span class="tab-icon">⚙</span><span class="tab-label">設定</span>
+    </button>
+  </nav>
+
+  <!-- ADR-001 依存スクリプト（順序固定）
+       1. tennis-core.js  : 純計算（GAS無依存）
+       2. tennis-store.js : IndexedDB 薄ラッパー（window.store）
+       3. tennis-offline-io.js : JSON I/O（window.io / S6 直前のボタン追加で使用）
+  -->
+  <script src="./tennis-core.js"></script>
+  <script src="./tennis-store.js"></script>
+  <script src="./tennis-offline-io.js"></script>
+
+  <script>
+    'use strict';
+
+    // ============================================================
+    // ADR-001 S4: file:// IndexedDB 版アプリ本体
+    // ------------------------------------------------------------
+    // 設計:
+    //   - URL ハッシュ (#view=xxx[&round=N]) で画面遷移を表現
+    //   - 全データは IndexedDB (tennis-offline-v1) に永続化
+    //   - GAS呼出（旧API mobileXxx 系統）は完全廃止
+    //     代わりに tennis-store.js の Promise API + tennis-core.js の純計算で実装
+    // ============================================================
+
+    // ─── ハッシュパース ─────────────────────────────────────────
+    // file:// では window.location.search が安定しないため #view=rounds&round=3 形式を採用
+    function parseHash() {
+      var h = String(window.location.hash || '').replace(/^#/, '');
+      var out = {};
+      h.split('&').forEach(function (kv) {
+        if (!kv) return;
+        var i = kv.indexOf('=');
+        if (i < 0) { out[decodeURIComponent(kv)] = ''; return; }
+        out[decodeURIComponent(kv.slice(0, i))] = decodeURIComponent(kv.slice(i + 1));
+      });
+      return out;
+    }
+
+    // VIEW / ROUND をハッシュから都度取得（refresh 時に更新）
+    var VIEW = 'rounds';
+    var ROUND = null;
+    function refreshHashState() {
+      var p = parseHash();
+      VIEW = p.view || 'rounds';
+      ROUND = p.round != null && p.round !== '' ? p.round : null;
+    }
+
+    // 画面遷移: ハッシュを書き換えて refresh()
+    function navigateTo(hashStr) {
+      // hashStr は '#view=xxx' 形式。'?...' は受け付けない（file:// 不安定なため）
+      if (!hashStr) hashStr = '#view=rounds';
+      if (hashStr.indexOf('#') !== 0) hashStr = '#' + hashStr.replace(/^\?/, '');
+      // 同一ハッシュ更新では hashchange が走らないので、明示的に refresh を呼ぶ
+      if (window.location.hash === hashStr) {
+        refresh();
+      } else {
+        window.location.hash = hashStr;
+        // hashchange リスナで refresh() が走る
+      }
+    }
+
+    // ─── エラー表示・HTMLエスケープ ─────────────────────────────
+    function showError(msg) {
+      var main = document.getElementById('main');
+      main.removeAttribute('aria-busy');
+      main.innerHTML =
+        '<div class="error">エラー: ' + escapeHtml(String(msg)) + '<br><br>' +
+        '<button onclick="refresh()" style="padding:10px 20px;border-radius:8px;border:none;background:#007aff;color:#fff;font-size:15px;cursor:pointer;">再読み込み</button>' +
+        '</div>';
+    }
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    // spec/feature-round-list-expanded-2026-05-24.md §4-3:
+    //   ラウンド一覧の試合行で使うカテゴリ短縮表記（414px幅で1行に収めるため）。
+    //   tennis-core が日本語フルラベル / コード値どちらを返しても短縮値へ正規化する。
+    //   未知の値はフォールバックでそのまま返す。
+    function shortCategory(type) {
+      var t = String(type || '');
+      if (t === 'ミックスダブルス' || t === 'ミックス' || t === 'mix' || t === 'mixed' || t === 'mixedDoubles') return 'ミックス';
+      if (t === '男子ダブルス'     || t === '男ダブ'  || t === 'md'  || t === 'mensDoubles')                  return '男ダブ';
+      if (t === '女子ダブルス'     || t === '女ダブ'  || t === 'wd'  || t === 'womensDoubles')                return '女ダブ';
+      if (t === '男子シングルス'   || t === '男シ'    || t === 'ms'  || t === 'mensSingles')                  return '男シ';
+      if (t === '女子シングルス'   || t === '女シ'    || t === 'ws'  || t === 'womensSingles')                return '女シ';
+      return t; // 未知値はフォールバック
+    }
+
+    // ─── refresh: ハッシュを再読んで適切な loadXxx を呼ぶ ───────
+    function refresh() {
+      refreshHashState();
+      if (VIEW === 'home') { navigateTo('#view=rounds'); return; }
+      if (VIEW === 'rounds') loadRounds();
+      else if (VIEW === 'round') loadRound();
+      else if (VIEW === 'stats') loadStats();
+      else if (VIEW === 'members') loadMembers();
+      else if (VIEW === 'config') loadConfig();
+      else if (VIEW === 'generate') loadGenerate();
+      else { navigateTo('#view=rounds'); return; }
+      setActiveTab();
+    }
+
+    // hashchange で refresh
+    window.addEventListener('hashchange', refresh);
+
+    // ─── データアクセス層（IndexedDB → 旧 mobileXxx 互換オブジェクト）
+    // ------------------------------------------------------------
+    // ここが S4 の中核置換。13関数の戻り値を mobile.html のレンダラがそのまま使えるよう
+    // 旧 mobileXxx と同じ形のオブジェクト/配列を返す。
+    // ============================================================
+
+    // ── 設定取得（既定値を補完）──────────────────────────────
+    // 2026-05-26 オーナー指示「優先順位を UI で手動調整可能化」:
+    //   アルゴリズム重みのデフォルト値（dbGetConfig の penaltyWeights フォールバック用）。
+    //   tennis-core.js の PENALTY 定数と同じ値を保持し、旧データ（penaltyWeights 未保存）でも
+    //   デフォルト動作になるようにする。UI 入力欄の min="default" としても参照。
+    //   ※ hard 制約（コート空き禁止・'none' 除外・カテゴリ最低1試合）は UI 調整不可・固定なので含めない。
+    //
+    // 2026-05-26 オーナー差し戻し（hard 固定化）:
+    //   CATEGORY_ZERO_PENALTY は「カテゴリ最低1試合 はマスト」のため UI 非表示・hard 固定化。
+    //   DEFAULT_PENALTY_WEIGHTS から削除し、collectConfig/renderConfig 等からも除外。
+    //   tennis-core.js の effectivePenalty で常に PENALTY デフォルト値 (1000000) を強制する。
+    var DEFAULT_PENALTY_WEIGHTS = {
+      // クラス1: 試合数均等
+      MEMBER_GAP_WEIGHT: 100000,
+      SKIP_MIN_PLAY: 100000,
+      // soft hard 級
+      DUPLICATE_PAIR_PENALTY: 30000,
+      // クラス2: ペア・対戦多様性
+      SAME_PAIR: 3000,
+      RECENT_PAIR_PENALTY: 4000,
+      SAME_OPPONENT_PAIR: 2500,
+      RECENT_OPPONENT_PENALTY: 3000,
+      SAME_OPPONENT_INDIV: 1800,
+      RECENT_OPPONENT_INDIV_PENALTY: 800,
+      // クラス3: 連続休憩抑制
+      CONSECUTIVE_SKIP_PENALTY: 1500,
+      // クラス4: ミックス選好
+      MIX_PREFER_BONUS: 10,
+      MIX_AVOID_PENALTY: 10,
+      // クラス5: level差
+      LEVEL_DIFF: 0,
+    };
+
+    async function dbGetConfig() {
+      // tennis-store.js: store.get('config', 'main') → { id:'main', ...config } or undefined
+      var row = await window.store.get('config', 'main');
+      if (!row) row = {};
+      // spec/feature-member-mix-preference-2026-05-22.md §4-2 / §4-5 A案:
+      //   旧 config.mixedPreference は読み出し時に無視する（残っていても破壊しない）。
+      //   個別ミックス希望は members レコード側に移行済。
+      // 2026-05-26: penaltyWeights を読み出し時にデフォルト値で補完。
+      //   旧データに penaltyWeights が無い場合は DEFAULT_PENALTY_WEIGHTS をそのまま返す。
+      //   部分保存（一部キーのみ）にも対応するため Object.assign でデフォルトに被せる。
+      var penaltyWeights = Object.assign({}, DEFAULT_PENALTY_WEIGHTS, row.penaltyWeights || {});
+      return {
+        ok: true,
+        courtCount:    row.courtCount != null ? Number(row.courtCount) : 2,
+        teamAName:     row.teamAName  != null ? String(row.teamAName)  : 'チームA',
+        teamBName:     row.teamBName  != null ? String(row.teamBName)  : 'チームB',
+        plannedRounds: row.plannedRounds != null ? Number(row.plannedRounds) : null,
+        categories: Object.assign({
+          mensDoubles:    true,
+          womensDoubles:  true,
+          mixedDoubles:   true,
+          mensSingles:    false,
+          womensSingles:  false,
+        }, row.categories || {}),
+        mixedCount: row.mixedCount === '' || row.mixedCount == null ? null : Number(row.mixedCount),
+        penaltyWeights: penaltyWeights,
+      };
+    }
+
+    // ── 設定保存（履歴ガード付き） ─────────────────────────────
+    async function dbSaveConfig(config, force) {
+      var forceFlag = (force === true || force === 'true');
+      // 現在の categories を取得して OFF にしようとしているものを抽出
+      var cur = await dbGetConfig();
+      var turningOff = [];
+      var CAT = window.TennisCore.CATEGORY;
+      if (config.categories) {
+        if (cur.categories.mensDoubles    && !config.categories.mensDoubles)    turningOff.push(CAT.MENS_DOUBLES);
+        if (cur.categories.womensDoubles  && !config.categories.womensDoubles)  turningOff.push(CAT.WOMENS_DOUBLES);
+        if (cur.categories.mixedDoubles   && !config.categories.mixedDoubles)   turningOff.push(CAT.MIXED_DOUBLES);
+        if (cur.categories.mensSingles    && !config.categories.mensSingles)    turningOff.push(CAT.MENS_SINGLES);
+        if (cur.categories.womensSingles  && !config.categories.womensSingles)  turningOff.push(CAT.WOMENS_SINGLES);
+      }
+      // 履歴ガード: OFF対象のカテゴリーが履歴に1件以上あれば force=false で拒否
+      if (turningOff.length > 0 && !forceFlag) {
+        var hist = await window.store.getAll('history');
+        var counts = {};
+        var total = 0;
+        hist.forEach(function (h) {
+          var t = String(h.type || '').trim();
+          if (turningOff.indexOf(t) >= 0) { counts[t] = (counts[t] || 0) + 1; total++; }
+        });
+        if (total > 0) {
+          var detail = Object.keys(counts).map(function (k) { return k + ':' + counts[k] + '件'; }).join(', ');
+          throw new Error('履歴に該当カテゴリーの試合が ' + total + ' 件あります（' + detail + '）。確認の上、強制保存してください。');
+        }
+      }
+      // 2026-05-26: アルゴリズム重み (penaltyWeights) の保存
+      //   各キーが数値なら採用、それ以外（undefined/NaN/null）は DEFAULT_PENALTY_WEIGHTS の値で補完。
+      //   旧データとの後方互換を担保するため、保存形は常に全キーを持たせる。
+      var cfgPW = (config && config.penaltyWeights) || {};
+      var normPW = {};
+      Object.keys(DEFAULT_PENALTY_WEIGHTS).forEach(function (k) {
+        var v = cfgPW[k];
+        var n = (v === '' || v == null) ? NaN : Number(v);
+        normPW[k] = isNaN(n) ? DEFAULT_PENALTY_WEIGHTS[k] : n;
+      });
+      // put（id='main' 固定）
+      var row = {
+        id: 'main',
+        courtCount:    Number(config.courtCount) || 2,
+        teamAName:     String(config.teamAName || '').slice(0, 30) || 'チームA',
+        teamBName:     String(config.teamBName || '').slice(0, 30) || 'チームB',
+        plannedRounds: config.plannedRounds === '' || config.plannedRounds == null ? null : Number(config.plannedRounds),
+        categories: {
+          mensDoubles:    !!(config.categories && config.categories.mensDoubles),
+          womensDoubles:  !!(config.categories && config.categories.womensDoubles),
+          mixedDoubles:   !!(config.categories && config.categories.mixedDoubles),
+          mensSingles:    !!(config.categories && config.categories.mensSingles),
+          womensSingles:  !!(config.categories && config.categories.womensSingles),
+        },
+        mixedCount: config.mixedCount === '' || config.mixedCount == null ? null : Number(config.mixedCount),
+        // spec/feature-member-mix-preference-2026-05-22.md §4-2:
+        //   旧 config.mixedPreference は書き込み時に削除（保存しない）。
+        //   個別希望は members レコード側で管理する。
+        // 2026-05-26: アルゴリズム重み（UI で手動調整可能）
+        penaltyWeights: normPW,
+      };
+      await window.store.put('config', row);
+      return { ok: true, savedAt: new Date().toISOString(), turnedOff: turningOff, forced: forceFlag };
+    }
+
+    // ── メンバー取得（team フィールドで teamA/teamB に振り分け） ─
+    async function dbGetMembers() {
+      var cfg = await dbGetConfig();
+      var all = await window.store.getAll('members');
+      // 履歴から個人成績（勝/負）を集計
+      var hist = await window.store.getAll('history');
+      var statByName = {};
+      hist.forEach(function (m) {
+        var listA = Array.isArray(m.a) ? m.a : [];
+        var listB = Array.isArray(m.b) ? m.b : [];
+        listA.forEach(function (n) {
+          if (!n) return;
+          if (!statByName[n]) statByName[n] = { played: 0, win: 0, loss: 0 };
+          statByName[n].played++;
+          if (m.winner === 'A') statByName[n].win++;
+          else if (m.winner === 'B') statByName[n].loss++;
+        });
+        listB.forEach(function (n) {
+          if (!n) return;
+          if (!statByName[n]) statByName[n] = { played: 0, win: 0, loss: 0 };
+          statByName[n].played++;
+          if (m.winner === 'B') statByName[n].win++;
+          else if (m.winner === 'A') statByName[n].loss++;
+        });
+      });
+      // spec/feature-member-mix-preference-2026-05-22.md §4-1:
+      //   mixedPreference は 'more' | 'less' | 'none' | null の4状態。
+      //   旧レコードで未定義のものは null として返す（破壊しない）。
+      var normalizePreference = function (mp) {
+        if (mp === 'more' || mp === 'less' || mp === 'none') return mp;
+        return null;
+      };
+      var map = function (m) {
+        var s = statByName[m.name] || { played: 0, win: 0, loss: 0 };
+        return {
+          name:   String(m.name || ''),
+          gender: m.gender === '女' ? '女' : '男',
+          level:  m.level != null && !isNaN(Number(m.level)) ? Number(m.level) : null,
+          played: s.played, win: s.win, loss: s.loss,
+          mixedPreference: normalizePreference(m.mixedPreference),
+        };
+      };
+      var teamA = all.filter(function (m) { return m && m.team === 'A'; }).map(map);
+      var teamB = all.filter(function (m) { return m && m.team === 'B'; }).map(map);
+      return {
+        ok: true,
+        teamAName: cfg.teamAName,
+        teamBName: cfg.teamBName,
+        teamA: teamA,
+        teamB: teamB,
+      };
+    }
+
+    // ── メンバー保存（teamSide 単位で clear → put 連続）────────
+    async function dbSaveMembers(teamSide, members) {
+      if (teamSide !== 'A' && teamSide !== 'B') throw new Error('teamSide は A または B');
+      if (!Array.isArray(members)) throw new Error('members は配列必須');
+      // 当該チームのメンバーのみ削除（反対チームは保持）
+      var all = await window.store.getAll('members');
+      var toDelete = all.filter(function (m) { return m && m.team === teamSide; });
+      for (var i = 0; i < toDelete.length; i++) {
+        await window.store.delete('members', toDelete[i].id);
+      }
+      // 新メンバーを put（id は auto-increment で再採番）
+      // spec/feature-member-mix-preference-2026-05-22.md §4-1:
+      //   mixedPreference は 'more' | 'less' | 'none' | null の4状態。
+      //   不正値（または未指定）は null として保存（null も明示保持で破壊性なし）。
+      var savedCount = 0;
+      for (var j = 0; j < members.length; j++) {
+        var m = members[j];
+        if (!m || typeof m !== 'object') continue;
+        var name = String(m.name || '').trim();
+        if (name === '') continue;
+        var mp = m.mixedPreference;
+        var prefNorm = (mp === 'more' || mp === 'less' || mp === 'none') ? mp : null;
+        var row = {
+          team:   teamSide,
+          name:   name,
+          gender: String(m.gender || '男').trim() === '女' ? '女' : '男',
+          level:  m.level != null && !isNaN(Number(m.level)) ? Number(m.level) : null,
+          mixedPreference: prefNorm,
+        };
+        await window.store.put('members', row);
+        savedCount++;
+      }
+      return { ok: true, savedCount: savedCount, teamSide: teamSide };
+    }
+
+    // ── ラウンド一覧 ────────────────────────────────────────
+    // spec/feature-round-list-expanded-2026-05-24.md §5-1:
+    //   一覧画面でカードを開かずに試合内容を見えるようにするため、
+    //   試合配列も同時に返す（dbGetRound と意味的に同じ整形にする）。
+    async function dbGetRounds() {
+      var rounds = await window.store.getAll('rounds');
+      var hist = await window.store.getAll('history');
+      var ret = rounds.map(function (r) {
+        var matches = Array.isArray(r.matches) ? r.matches : [];
+        // 有効な試合のみ抽出（court 番号があるもの）
+        var validMatches = matches.filter(function (m) { return m && typeof m.court === 'number' && m.court > 0; });
+        var matchCount = validMatches.length;
+        // committed 判定: history に同 round の行があり、いずれかのスコアが非null
+        var hForR = hist.filter(function (h) { return Number(h.round) === Number(r.round); });
+        var committed = hForR.length > 0 && hForR.some(function (h) {
+          return (h.scoreA != null && h.scoreA !== '') || (h.scoreB != null && h.scoreB !== '');
+        });
+        // 試合配列を一覧表示用に整形（dbGetRound と同じキー構成）
+        var matchesOut = validMatches.map(function (m, idx) {
+          return {
+            idx:    idx,
+            court:  Number(m.court) || (idx + 1),
+            type:   String(m.type || ''),
+            a1:     String(m.a1 || ''),
+            a2:     String(m.a2 || ''),
+            b1:     String(m.b1 || ''),
+            b2:     String(m.b2 || ''),
+            scoreA: m.scoreA == null || m.scoreA === '' ? null : Number(m.scoreA),
+            scoreB: m.scoreB == null || m.scoreB === '' ? null : Number(m.scoreB),
+            winner: String(m.winner || ''),
+          };
+        });
+        return { round: Number(r.round), matchCount: matchCount, committed: committed, matches: matchesOut };
+      });
+      ret.sort(function (a, b) { return a.round - b.round; });
+      return ret;
+    }
+
+    // ── ラウンド詳細 ────────────────────────────────────────
+    async function dbGetRound(round) {
+      round = Number(round);
+      if (!round) throw new Error('round指定が不正');
+      var r = await window.store.get('rounds', round);
+      if (!r) throw new Error('ラウンドが見つかりません: 第' + round + 'ラウンド');
+      var matches = Array.isArray(r.matches) ? r.matches : [];
+      // mobile.html の renderRound が要求する形に整形（idx を付与）
+      var out = matches.map(function (m, idx) {
+        return {
+          idx:    idx,
+          court:  Number(m.court) || (idx + 1),
+          type:   String(m.type || ''),
+          a1:     String(m.a1 || ''),
+          a2:     String(m.a2 || ''),
+          b1:     String(m.b1 || ''),
+          b2:     String(m.b2 || ''),
+          level:  m.levelA != null && m.levelB != null ? String(m.levelA) + '-' + String(m.levelB) : '',
+          scoreA: m.scoreA == null || m.scoreA === '' ? null : Number(m.scoreA),
+          scoreB: m.scoreB == null || m.scoreB === '' ? null : Number(m.scoreB),
+          winner: String(m.winner || ''),
+        };
+      });
+      // committed 判定（history 側に該当 round の行があり、いずれかにスコアあり）
+      var hist = await window.store.getAll('history');
+      var hForR = hist.filter(function (h) { return Number(h.round) === round; });
+      var committed = hForR.length > 0 && hForR.some(function (h) {
+        return (h.scoreA != null && h.scoreA !== '') || (h.scoreB != null && h.scoreB !== '');
+      });
+      return { ok: true, round: round, matches: out, committed: committed };
+    }
+
+    // ── スコア中間保存（rounds ストアの matches[idx] にスコアを書き戻し）
+    async function dbSaveScores(round, scores) {
+      round = Number(round);
+      if (!round) throw new Error('round指定が不正');
+      if (!Array.isArray(scores)) throw new Error('scoresは配列必須');
+      var r = await window.store.get('rounds', round);
+      if (!r) throw new Error('ラウンドシート無し');
+      var matches = Array.isArray(r.matches) ? r.matches : [];
+      var savedCount = 0;
+      scores.forEach(function (s) {
+        if (s == null || typeof s.idx !== 'number') return;
+        var m = matches[s.idx];
+        if (!m) return;
+        var wrote = false;
+        if (s.scoreA != null && !isNaN(Number(s.scoreA))) {
+          m.scoreA = Number(s.scoreA);
+          wrote = true;
+        }
+        if (s.scoreB != null && !isNaN(Number(s.scoreB))) {
+          m.scoreB = Number(s.scoreB);
+          wrote = true;
+        }
+        if (wrote) {
+          // 勝者を再計算
+          if (m.scoreA != null && m.scoreB != null) {
+            m.winner = m.scoreA > m.scoreB ? 'A' : m.scoreA < m.scoreB ? 'B' : '引分';
+          }
+          savedCount++;
+        }
+      });
+      r.matches = matches;
+      await window.store.put('rounds', r);
+      return { ok: true, savedCount: savedCount };
+    }
+
+    // ── 履歴確定（rounds → history へ転記、rounds は残す）
+    async function dbCommitRound(round) {
+      round = Number(round);
+      if (!round) throw new Error('round指定が不正');
+      var r = await window.store.get('rounds', round);
+      if (!r) throw new Error('ラウンドシート無し');
+      // 既存 history から同 round の行を削除（再確定対応）
+      var hist = await window.store.getAll('history');
+      var toDelete = hist.filter(function (h) { return Number(h.round) === round; });
+      for (var i = 0; i < toDelete.length; i++) {
+        await window.store.delete('history', toDelete[i].id);
+      }
+      // matches を history 形式に変換して push
+      var matches = Array.isArray(r.matches) ? r.matches : [];
+      var writeCount = 0;
+      var scoredCount = 0;
+      for (var j = 0; j < matches.length; j++) {
+        var m = matches[j];
+        if (!m || typeof m.court !== 'number' || m.court <= 0) continue;
+        var aList = [m.a1, m.a2].filter(function (n) { return n && n !== ''; });
+        var bList = [m.b1, m.b2].filter(function (n) { return n && n !== ''; });
+        var hRow = {
+          round:  round,
+          court:  Number(m.court),
+          type:   String(m.type || ''),
+          a:      aList,
+          b:      bList,
+          scoreA: m.scoreA == null || m.scoreA === '' ? null : Number(m.scoreA),
+          scoreB: m.scoreB == null || m.scoreB === '' ? null : Number(m.scoreB),
+          winner: String(m.winner || ''),
+        };
+        await window.store.put('history', hRow);
+        writeCount++;
+        if (hRow.scoreA != null || hRow.scoreB != null) scoredCount++;
+      }
+      return {
+        ok:           true,
+        round:        round,
+        writeCount:   writeCount,
+        scoredCount:  scoredCount,
+        statsUpdated: true,
+        statsError:   null,
+        message:      '第' + round + 'ラウンドの ' + writeCount + '試合を履歴に反映（スコア入力済み: ' + scoredCount + '試合）',
+      };
+    }
+
+    // ── 成績集計（tennis-core.calcStats_ を流用）
+    async function dbGetStats() {
+      var cfg = await dbGetConfig();
+      var hist = await window.store.getAll('history');
+      // tennis-core が期待する history 形式: { round, court, type, a:[], b:[], scoreA, scoreB, winner }
+      // dbCommitRound で出すのと同じ形なのでそのまま渡せる
+      var s = window.TennisCore.calcStats_(hist, cfg.teamAName, cfg.teamBName);
+      // mobile.html renderStats が要求する形（teamARate / teamBRate / total / scored）に整形
+      var t = s.team;
+      var totalDecided = t.teamAWin + t.teamBWin;
+      var teamARate = totalDecided > 0 ? Math.round(t.teamAWin / totalDecided * 1000) / 10 : 0;
+      var teamBRate = totalDecided > 0 ? Math.round(t.teamBWin / totalDecided * 1000) / 10 : 0;
+      // personal.rate は core では '50.0%' 文字列で返るが、mobile.html は数値 + '%' を後付け
+      // → rate を数値に変換する（'-' は null に）
+      var personalNum = s.personal.map(function (p) {
+        var rateNum = null;
+        if (typeof p.rate === 'string') {
+          var m2 = p.rate.match(/^([\d.]+)%$/);
+          if (m2) rateNum = Number(m2[1]);
+        }
+        return {
+          name: p.name, team: p.team,
+          played: p.played, win: p.win, loss: p.loss, draw: p.draw,
+          pf: p.pf, pa: p.pa, diff: p.diff,
+          rate: rateNum,
+        };
+      });
+      return {
+        ok: true,
+        team: {
+          teamAName: t.teamAName, teamBName: t.teamBName,
+          teamAWin: t.teamAWin, teamBWin: t.teamBWin, draw: t.draw,
+          teamARate: teamARate, teamBRate: teamBRate,
+          scored: t.scored, total: hist.length,
+        },
+        personal: personalNum,
+      };
+    }
+
+    // ── 自動ラウンド生成（tennis-core.buildRound_ を呼ぶ）
+    // spec/feature-mixedcount-hard-2026-05-23.md:
+    //   mixedCount を **HARD 制約**に格上げ。N ラウンド連続生成全体で「ちょうど M 試合」を保証する。
+    //   配分計画は generateOne() 側で生成し、各ラウンドに targetMix を渡す。
+    //   ※ dbGenerateRound 単体としての従来の累積計算ロジックは撤去（オーケストレータ層へ移管）。
+    //
+    //   優先順位:
+    //     ① targetMix が数値で渡される → fixedMix=targetMix で固定（generateOne 配分計画から）
+    //     ② targetMix が未指定 かつ config.mixedCount が数値 → 単発生成パス（M を 1R 分の fixedMix）
+    //        ※ 単発生成 (N=1) で mixedCount=M が入った場合の互換維持
+    //     ③ targetMix が未指定 かつ mixedCount が null かつ 個別希望に non-null
+    //        → planOptimalConfiguration_ 内の自動算出に委ねる
+    //     ④ 全て null/未指定 → auto（buildRound_ 直叩き・従来パス）
+    //
+    //   注意: 'none' のメンバーは tryMixed_ プール除外・maxMix_eff clamp で常にハード保護される。
+    async function dbGenerateRound(targetMix) {
+      var cfg = await dbGetConfig();
+      var all = await window.store.getAll('members');
+      // 'more' | 'less' | 'none' | null に正規化（旧レコードは undefined → null）
+      var normPref = function (mp) {
+        return (mp === 'more' || mp === 'less' || mp === 'none') ? mp : null;
+      };
+      var teamA = all.filter(function (m) { return m && m.team === 'A'; }).map(function (m) {
+        return {
+          name: m.name,
+          level: m.level || 0,
+          gender: m.gender === '女' ? '女' : '男',
+          mixedPreference: normPref(m.mixedPreference),
+        };
+      });
+      var teamB = all.filter(function (m) { return m && m.team === 'B'; }).map(function (m) {
+        return {
+          name: m.name,
+          level: m.level || 0,
+          gender: m.gender === '女' ? '女' : '男',
+          mixedPreference: normPref(m.mixedPreference),
+        };
+      });
+      var hist = await window.store.getAll('history');
+      // 既存 rounds（未確定含む）も history 形式に合流させる:
+      //   ペア多様性・連続休憩抑制のスコア計算は ctx.history を見るため、
+      //   スコア確定前の自動生成ラウンド（rounds ストアにのみ存在）も
+      //   「過去のラウンド」として参照しないと、5R 連続生成で同じペアが
+      //   出続ける（spec/feature-pair-diversity-priority-2026-05-22.md §4-2 直近窓集計の前提）
+      var rounds = await window.store.getAll('rounds');
+      // history に登場済みの round 番号集合（同 round の重複を避けるため）
+      var historyRoundSet = {};
+      hist.forEach(function (h) { historyRoundSet[Number(h.round)] = true; });
+      rounds.forEach(function (r) {
+        var rnum = Number(r.round);
+        if (historyRoundSet[rnum]) return; // history で既にカバー済
+        (r.matches || []).forEach(function (m) {
+          if (!m || typeof m.court !== 'number' || m.court <= 0) return;
+          var aList = [m.a1, m.a2].filter(function (n) { return n && n !== ''; });
+          var bList = [m.b1, m.b2].filter(function (n) { return n && n !== ''; });
+          if (aList.length === 0 && bList.length === 0) return; // 空テンプレ行はスキップ
+          hist.push({
+            round:  rnum,
+            court:  Number(m.court),
+            type:   String(m.type || ''),
+            a:      aList,
+            b:      bList,
+            scoreA: null,
+            scoreB: null,
+            winner: '',
+          });
+        });
+      });
+      // tennis-core の ctx 形式
+      // 2026-05-26: penaltyWeights を ctx に同梱（tennis-core の effectivePenalty で参照される）。
+      //   未調整なら DEFAULT_PENALTY_WEIGHTS が dbGetConfig で補完済みのため、
+      //   常に penaltyWeights 同梱で OK（UI 未調整時は PENALTY と同じ値）。
+      var ctx = {
+        courts: cfg.courtCount,
+        teamA: teamA,
+        teamB: teamB,
+        categories: cfg.categories,
+        history: hist,
+        penaltyWeights: cfg.penaltyWeights || undefined,
+      };
+      // 次のラウンド番号 = 既存 rounds の max + 1
+      var nextRound = rounds.length > 0
+        ? Math.max.apply(null, rounds.map(function (r) { return Number(r.round); })) + 1
+        : 1;
+
+      // 個別希望に non-null（'more'/'less'/'none'）が1人でもいるか判定
+      var hasIndivPreference = teamA.concat(teamB).some(function (p) {
+        return p.mixedPreference != null;
+      });
+
+      // 判定順（spec/feature-mixedcount-hard-2026-05-23.md §6-2/§6-7）:
+      //   ⓪ targetMix が { MD, FD, Mix } オブジェクト → slotOverride を直接渡す（最優先）
+      //      （2026-05-24 カテゴリ最低1試合対応・generateOne 側で N 全体 plan を配分）
+      //   ① targetMix が数値（HARD 配分計画）→ fixedMix で plan 再計算
+      //   ② targetMix 未指定 + cfg.mixedCount が数値 → 単発生成互換パス（M を 1R 分 fixedMix）
+      //   ③ targetMix 未指定 + 個別希望 non-null → tennis-core auto 算出
+      //   ④ 全 null/未指定 → buildRound_ 直叩き（従来パス）
+      //   ※ 'none' は planOptimalConfiguration_ 内 maxMix_eff clamp + tryMixed_ プール除外で
+      //     常にハード保護される。
+      var matches;
+      var hasSlotOverride = (targetMix != null && typeof targetMix === 'object'
+                             && targetMix.MD != null && targetMix.FD != null && targetMix.Mix != null);
+      var hasTargetMix = !hasSlotOverride && (targetMix != null && !isNaN(Number(targetMix)));
+      var hasMixedCountValue = (cfg.mixedCount != null && cfg.mixedCount !== ''
+                                && !isNaN(Number(cfg.mixedCount)));
+      if (hasSlotOverride) {
+        // ⓪ slotOverride 直接指定パス（generateOne N全体 plan 配分）
+        matches = window.TennisCore.buildRound_(ctx, nextRound, {
+          MD: Number(targetMix.MD) || 0,
+          FD: Number(targetMix.FD) || 0,
+          Mix: Number(targetMix.Mix) || 0,
+        });
+      } else if (hasTargetMix) {
+        // ① 配分計画 targetMix パス（HARD 制約・generateOne から渡される）
+        var planTM = window.TennisCore.planOptimalConfiguration_(1, ctx, { fixedMix: Number(targetMix) });
+        var slotTM = window.TennisCore.decideRoundSlots_(planTM, { MD: 0, FD: 0, Mix: 0 }, 1, 1, ctx.courts, ctx);
+        matches = window.TennisCore.buildRound_(ctx, nextRound, slotTM);
+      } else if (hasMixedCountValue) {
+        // ② 単発生成互換パス: generateOne を経由せず dbGenerateRound を直接呼ぶ系
+        //    （例: 旧 API 互換テスト・将来の単発専用ボタン）。M を 1R 分 fixedMix としてクランプ。
+        var planMC = window.TennisCore.planOptimalConfiguration_(1, ctx, { fixedMix: Number(cfg.mixedCount) });
+        var slotMC = window.TennisCore.decideRoundSlots_(planMC, { MD: 0, FD: 0, Mix: 0 }, 1, 1, ctx.courts, ctx);
+        matches = window.TennisCore.buildRound_(ctx, nextRound, slotMC);
+      } else if (hasIndivPreference) {
+        // ③ 個別希望優先パス: tennis-core 側で fixedMix を自動算出
+        var plan = window.TennisCore.planOptimalConfiguration_(1, ctx, {});
+        var slot = window.TennisCore.decideRoundSlots_(plan, { MD: 0, FD: 0, Mix: 0 }, 1, 1, ctx.courts, ctx);
+        matches = window.TennisCore.buildRound_(ctx, nextRound, slot);
+      } else {
+        // ④ 完全 auto: buildRound_ 直叩き（従来パス）
+        matches = window.TennisCore.buildRound_(ctx, nextRound);
+      }
+
+      // 2026-05-25 改訂: matches=[] でも空テンプレ matches[] で record する (slotOverride 経由)
+      //   理由: bucket gap=1.0 hard 除外で plan の合計試合数 < totalSlots になる構成では
+      //   後段の R で buildRound_ が matches=[] を返す。以前はエラー停止していたが、
+      //   それだと「6 ラウンドまで生成 / 7 ラウンド目で停止」のような中途半端な結果になり、
+      //   オーナー期待「N ラウンド分の枠は最低確保」と乖離する。
+      //
+      //   slotOverride 経由 (generateOne の slotPlan パス) のときは:
+      //     slotOverride={MD:0,FD:0,Mix:0} のような全0 でも 空 matches[] で record する。
+      //     一覧画面では「0試合の空ラウンド」として表示される (オーナー視認可能)。
+      //
+      //   slotOverride なし (旧 buildRound_ 直叩き) のときは従来通りエラー (メンバー不足等の重大エラー警告)。
+      var allowEmpty = hasSlotOverride || hasTargetMix || hasMixedCountValue || hasIndivPreference;
+      if (!matches || matches.length === 0) {
+        if (allowEmpty) {
+          matches = []; // 空 matches[] で record (オーナー視認可能)
+        } else {
+          throw new Error('試合を組めませんでした（メンバー不足・カテゴリー全OFF・全員出場済等）');
+        }
+      }
+      // rounds に put（keyPath='round' なので round を含めること）
+      await window.store.put('rounds', { round: nextRound, matches: matches });
+      return { ok: true, round: nextRound, matchCount: matches.length };
+    }
+
+    // ── 空テンプレでラウンド作成（コート数分の空 matches）
+    async function dbGenerateRoundCustom() {
+      var cfg = await dbGetConfig();
+      var rounds = await window.store.getAll('rounds');
+      var nextRound = rounds.length > 0
+        ? Math.max.apply(null, rounds.map(function (r) { return Number(r.round); })) + 1
+        : 1;
+      var courts = cfg.courtCount;
+      var blank = [];
+      for (var i = 0; i < courts; i++) {
+        blank.push({ court: i + 1, type: 'ダブルス', a1: '', a2: '', b1: '', b2: '' });
+      }
+      await window.store.put('rounds', { round: nextRound, matches: blank });
+      return { ok: true, round: nextRound, matchCount: courts, isCustom: true };
+    }
+
+    // ── 個別ラウンド削除（rounds から削除 + history からも該当 round 行を削除）
+    async function dbDeleteRound(round) {
+      round = Number(round);
+      if (!round) throw new Error('round指定が不正');
+      await window.store.delete('rounds', round);
+      var hist = await window.store.getAll('history');
+      var toDelete = hist.filter(function (h) { return Number(h.round) === round; });
+      for (var i = 0; i < toDelete.length; i++) {
+        await window.store.delete('history', toDelete[i].id);
+      }
+      return {
+        ok: true, round: round,
+        deletedSheet: true,
+        deletedHistRows: toDelete.length,
+        statsUpdated: true, statsError: null,
+        message: '第' + round + 'ラウンドを削除しました（履歴: ' + toDelete.length + '行削除）',
+      };
+    }
+
+    // ── 全クリア（rounds + history 全削除）
+    async function dbClearAllRounds() {
+      var rounds = await window.store.getAll('rounds');
+      var hist = await window.store.getAll('history');
+      await window.store.clear('rounds');
+      await window.store.clear('history');
+      return {
+        ok: true,
+        deletedSheetCount: rounds.length,
+        clearedHistRows: hist.length,
+        message: rounds.length + '個のラウンドと' + hist.length + '行の履歴をクリアしました',
+      };
+    }
+
+    // ============================================================
+    // 画面別ロード/描画
+    // ============================================================
+
+    // ─── 画面1: ラウンド一覧 ───────────────────────────────
+    async function loadRounds() {
+      var main = document.getElementById('main');
+      main.setAttribute('aria-busy', 'true');
+      main.innerHTML =
+        '<div class="mini-dashboard skeleton" style="height:32px;margin-bottom:12px;"></div>' +
+        '<div class="round-list">' +
+          '<div class="skeleton-card"><div class="skeleton skeleton-line long"></div><div class="skeleton skeleton-line short"></div></div>' +
+          '<div class="skeleton-card"><div class="skeleton skeleton-line long"></div><div class="skeleton skeleton-line short"></div></div>' +
+          '<div class="skeleton-card"><div class="skeleton skeleton-line long"></div><div class="skeleton skeleton-line short"></div></div>' +
+        '</div>';
+      try {
+        var rounds = await dbGetRounds();
+        var stats = null;
+        try { stats = await dbGetStats(); } catch (e) { stats = null; }
+        renderRounds(rounds, stats);
+      } catch (err) {
+        showError((err && err.message) || '読込エラー');
+      }
+    }
+
+    function renderRounds(rounds, stats) {
+      document.getElementById('page-title').textContent = 'テニス対戦管理';
+      var main = document.getElementById('main');
+      main.removeAttribute('aria-busy');
+
+      var dashboardHtml = '';
+      var totalRounds = rounds ? rounds.length : 0;
+      var committedCount = rounds ? rounds.filter(function (r) { return r.committed; }).length : 0;
+      var baseHtml = '<span>ラウンド ' + totalRounds + ' / 確定済み ' + committedCount + '</span>';
+
+      if (stats && stats.ok && stats.team) {
+        var t = stats.team;
+        var aWin = t.teamAWin != null ? t.teamAWin : 0;
+        var bWin = t.teamBWin != null ? t.teamBWin : 0;
+        var aRate = t.scored ? (t.teamARate != null ? t.teamARate + '%' : '-') : '-';
+        var bRate = t.scored ? (t.teamBRate != null ? t.teamBRate + '%' : '-') : '-';
+        dashboardHtml =
+          '<div class="mini-dashboard">' +
+            baseHtml +
+            '<span>' + escapeHtml(t.teamAName || 'A') + ': ' + aWin + '勝' + bWin + '負 (' + aRate + ')</span>' +
+            '<span>' + escapeHtml(t.teamBName || 'B') + ': ' + bWin + '勝' + aWin + '負 (' + bRate + ')</span>' +
+          '</div>';
+      } else if (rounds) {
+        dashboardHtml = '<div class="mini-dashboard">' + baseHtml + '</div>';
+      }
+
+      if (!rounds || rounds.length === 0) {
+        main.innerHTML =
+          dashboardHtml +
+          '<div class="empty">ラウンドがありません。ラウンド生成画面でラウンドを作成してください。</div>';
+        return;
+      }
+
+      var cards = rounds.map(function (r) {
+        var statusClass = r.committed ? 'status-committed' : 'status-pending';
+        var statusLabel = r.committed ? '確定済' : '未確定';
+        // spec/feature-round-list-expanded-2026-05-24.md §4-2:
+        //   試合行リストを構築（dbGetRounds が matches を返している）
+        var matches = Array.isArray(r.matches) ? r.matches : [];
+        var matchesHtml = '';
+        if (matches.length > 0) {
+          var rowsHtml = matches.map(function (m) {
+            // ペア表示（2人なら「・」連結、1人なら単独表示）
+            var pairA = m.a2 ? (escapeHtml(m.a1) + '・' + escapeHtml(m.a2)) : escapeHtml(m.a1 || '');
+            var pairB = m.b2 ? (escapeHtml(m.b1) + '・' + escapeHtml(m.b2)) : escapeHtml(m.b1 || '');
+            // スコア・勝者表示（§4-4 ルール）
+            var scoreHtml = '';
+            var winnerHtml = '';
+            if (m.scoreA != null && m.scoreB != null) {
+              scoreHtml = escapeHtml(String(m.scoreA)) + '-' + escapeHtml(String(m.scoreB));
+              if (m.winner === 'A' || m.winner === 'B') {
+                winnerHtml = '<span class="rc-winner winner-' + m.winner + '">' + m.winner + '</span>';
+              } else if (m.winner === '引分') {
+                winnerHtml = '<span class="rc-winner winner-引分">引</span>';
+              } else {
+                winnerHtml = '<span class="rc-winner" aria-hidden="true"></span>';
+              }
+            } else if (m.scoreA != null || m.scoreB != null) {
+              // 片側のみ入力
+              var sA = m.scoreA != null ? escapeHtml(String(m.scoreA)) : '-';
+              var sB = m.scoreB != null ? escapeHtml(String(m.scoreB)) : '-';
+              scoreHtml = sA + '-' + sB;
+              winnerHtml = '<span class="rc-winner" aria-hidden="true"></span>';
+            } else {
+              // 両側未入力
+              scoreHtml = '-';
+              winnerHtml = '<span class="rc-winner" aria-hidden="true"></span>';
+            }
+            return '<div class="round-card-match-row">' +
+              '<span class="rc-court">コート' + escapeHtml(String(m.court)) + '</span>' +
+              '<span class="rc-type">' + escapeHtml(shortCategory(m.type)) + '</span>' +
+              '<span class="rc-pair rc-pair-a">' + pairA + '</span>' +
+              '<span class="rc-vs">vs</span>' +
+              '<span class="rc-pair rc-pair-b">' + pairB + '</span>' +
+              '<span class="rc-score">' + scoreHtml + '</span>' +
+              winnerHtml +
+              '</div>';
+          }).join('');
+          matchesHtml = '<div class="round-card-matches">' + rowsHtml + '</div>';
+        }
+        return '<div class="round-card" onclick="goToRound(' + r.round + ')" onkeydown="handleRoundCardKey(event, ' + r.round + ')" role="button" tabindex="0">' +
+          '<button class="round-card-delete" onclick="event.stopPropagation(); deleteRound(' + r.round + ')" aria-label="第' + r.round + 'ラウンドを削除">×</button>' +
+          '<div class="round-card-header">' +
+            '<div class="round-card-title">第' + escapeHtml(String(r.round)) + 'ラウンド</div>' +
+            '<div class="round-card-status ' + statusClass + '">' + statusLabel + '</div>' +
+          '</div>' +
+          '<div class="round-card-meta">' + escapeHtml(String(r.matchCount)) + ' 試合</div>' +
+          matchesHtml +
+          '</div>';
+      }).join('');
+
+      main.innerHTML =
+        dashboardHtml +
+        '<div class="round-list">' + cards + '</div>' +
+        '<button class="footer-btn-danger" onclick="clearAllRounds()">全ラウンドと履歴をクリア</button>';
+    }
+
+    // 個別ラウンド削除（確認付き）
+    async function deleteRound(round) {
+      if (!confirm('第' + round + 'ラウンドを削除します。\n\n履歴の該当試合も削除されます。\n\n本当に削除しますか？')) return;
+      try {
+        var res = await dbDeleteRound(round);
+        alert(res.message || '削除しました');
+        loadRounds();
+      } catch (err) {
+        alert('削除失敗: ' + ((err && err.message) || String(err)));
+      }
+    }
+
+    // 全クリア（二重確認）
+    async function clearAllRounds() {
+      if (!confirm('危険: 全てのラウンドと履歴をクリアします。\n\nこの操作は取り消せません。\n\n本当に実行しますか？')) return;
+      if (!confirm('もう一度確認: 本当に全部消しますか？')) return;
+      try {
+        var res = await dbClearAllRounds();
+        alert(res.message || 'クリアしました');
+        navigateTo('#view=rounds');
+      } catch (err) {
+        alert('クリア失敗: ' + ((err && err.message) || String(err)));
+      }
+    }
+
+    // ─── 画面遷移ヘルパー ──────────────────────────────────
+    function goToRound(round) {
+      navigateTo('#view=round&round=' + encodeURIComponent(round));
+    }
+    function goToStats() {
+      navigateTo('#view=stats');
+    }
+    // 中優先 #2: role="button" tabindex=0 の .round-card で Enter/Space キー押下時に遷移発火（a11y）
+    function handleRoundCardKey(e, round) {
+      if (!e) return;
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+        e.preventDefault();
+        goToRound(round);
+      }
+    }
+
+    // ─── 画面2: ラウンド詳細 ───────────────────────────────
+    var currentRoundData = null;
+
+    async function loadRound() {
+      var main = document.getElementById('main');
+      main.setAttribute('aria-busy', 'true');
+      main.innerHTML =
+        '<div class="round-header"><div class="skeleton skeleton-line short" style="height:22px;width:70px;margin-bottom:12px;"></div></div>' +
+        '<div class="match-list">' +
+          '<div class="skeleton-card" style="gap:10px;">' +
+            '<div style="display:flex;justify-content:space-between;"><div class="skeleton skeleton-line" style="width:70px;height:20px;"></div><div class="skeleton skeleton-line" style="width:80px;height:20px;"></div></div>' +
+            '<div class="skeleton skeleton-line mid"></div>' +
+            '<div style="display:flex;gap:12px;justify-content:center;"><div class="skeleton" style="width:64px;height:48px;border-radius:8px;"></div><div class="skeleton" style="width:64px;height:48px;border-radius:8px;"></div></div>' +
+          '</div>' +
+        '</div>';
+      try {
+        var data = await dbGetRound(ROUND);
+        renderRound(data);
+      } catch (err) {
+        showError((err && err.message) || '読込エラー');
+      }
+    }
+
+    function renderRound(data) {
+      if (!data || !data.ok) { showError(data && data.error || 'データ取得失敗'); return; }
+      currentRoundData = data;
+      document.getElementById('main').removeAttribute('aria-busy');
+      document.getElementById('page-title').textContent = '第' + escapeHtml(String(ROUND)) + 'ラウンド';
+
+      var matchHtml = data.matches.map(function (m) {
+        var scoreA = m.scoreA != null ? m.scoreA : '';
+        var scoreB = m.scoreB != null ? m.scoreB : '';
+        var winner = m.winner || '-';
+        return '<div class="match-card" data-idx="' + m.idx + '">' +
+          '<div class="match-header">' +
+            '<span class="court-badge">コート ' + escapeHtml(String(m.court)) + '</span>' +
+            '<span class="match-type">' + escapeHtml(m.type) + '</span>' +
+          '</div>' +
+          '<div class="players">' +
+            '<div class="team team-a">' +
+              '<div class="player">' + escapeHtml(m.a1) + '</div>' +
+              (m.a2 ? '<div class="player">' + escapeHtml(m.a2) + '</div>' : '') +
+            '</div>' +
+            '<div class="vs">vs</div>' +
+            '<div class="team team-b">' +
+              '<div class="player">' + escapeHtml(m.b1) + '</div>' +
+              (m.b2 ? '<div class="player">' + escapeHtml(m.b2) + '</div>' : '') +
+            '</div>' +
+          '</div>' +
+          '<div class="score-row">' +
+            '<input type="number" inputmode="numeric" enterkeyhint="next" pattern="[0-9]*" min="0" max="99" class="score-input" data-side="A" value="' + escapeHtml(String(scoreA)) + '" placeholder="A">' +
+            '<span class="score-sep">-</span>' +
+            '<input type="number" inputmode="numeric" enterkeyhint="done" pattern="[0-9]*" min="0" max="99" class="score-input" data-side="B" value="' + escapeHtml(String(scoreB)) + '" placeholder="B">' +
+            '<div class="winner-display winner-' + escapeHtml(winner) + '">' + escapeHtml(winner) + '</div>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+
+      var committedBadge = data.committed ? '<span class="committed-badge">確定済</span>' : '';
+
+      document.getElementById('main').innerHTML =
+        '<div class="round-header">' + committedBadge + '</div>' +
+        '<div class="match-list">' + matchHtml + '</div>' +
+        '<button class="footer-btn footer-btn-fixed" id="btn-commit" onclick="commitRound()">このラウンドを履歴に確定</button>' +
+        '<a class="back-link" href="#view=rounds">ラウンド一覧に戻る</a>';
+
+      // スコア入力時に勝者をリアルタイム再計算
+      document.querySelectorAll('.score-input').forEach(function (input) {
+        input.addEventListener('input', updateWinner);
+      });
+    }
+
+    function updateWinner(e) {
+      var card = e.target.closest('.match-card');
+      var inputs = card.querySelectorAll('.score-input');
+      var sA = inputs[0].value !== '' ? Number(inputs[0].value) : null;
+      var sB = inputs[1].value !== '' ? Number(inputs[1].value) : null;
+      var display = card.querySelector('.winner-display');
+      var winner = '-';
+      if (sA != null && sB != null) {
+        if (sA > sB) winner = 'A';
+        else if (sA < sB) winner = 'B';
+        else winner = '引分';
+      }
+      display.textContent = winner;
+      display.className = 'winner-display winner-' + winner;
+    }
+
+    // 確定: scores 集めて dbSaveScores → dbCommitRound
+    async function commitRound() {
+      var scores = [];
+      document.querySelectorAll('.match-card').forEach(function (card) {
+        var idx = Number(card.dataset.idx);
+        var inputs = card.querySelectorAll('.score-input');
+        var scoreA = inputs[0].value !== '' ? Number(inputs[0].value) : null;
+        var scoreB = inputs[1].value !== '' ? Number(inputs[1].value) : null;
+        if (scoreA != null || scoreB != null) {
+          scores.push({ idx: idx, scoreA: scoreA, scoreB: scoreB });
+        }
+      });
+
+      var filledCount = scores.length;
+      var totalCount = currentRoundData ? currentRoundData.matches.length : '?';
+      var msg = '第' + ROUND + 'ラウンドを履歴に確定します。\n\n'
+        + 'スコア入力済み: ' + filledCount + ' / ' + totalCount + ' 試合\n\n'
+        + '確定後はラウンド一覧に戻ります。';
+      if (!confirm(msg)) return;
+
+      var btn = document.getElementById('btn-commit');
+      btn.disabled = true;
+      btn.textContent = '保存中...';
+
+      try {
+        await dbSaveScores(ROUND, scores);
+        var res = await dbCommitRound(ROUND);
+        alert(res.message || '確定しました');
+        navigateTo('#view=rounds');
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = 'このラウンドを履歴に確定';
+        showError('確定失敗: ' + ((err && err.message) || String(err)));
+      }
+    }
+
+    // ─── 画面3: 成績 ───────────────────────────────────────
+    async function loadStats() {
+      var main = document.getElementById('main');
+      main.setAttribute('aria-busy', 'true');
+      main.innerHTML =
+        '<div class="stats-section">' +
+          '<div class="skeleton skeleton-line mid" style="height:18px;margin-bottom:12px;"></div>' +
+          '<div class="skeleton skeleton-line long" style="height:60px;margin-bottom:8px;"></div>' +
+          '<div class="skeleton skeleton-line long" style="height:60px;margin-bottom:8px;"></div>' +
+        '</div>';
+      document.getElementById('page-title').textContent = '成績';
+      try {
+        var data = await dbGetStats();
+        renderStats(data);
+      } catch (err) {
+        showError((err && err.message) || '通信エラー');
+      }
+    }
+
+    function renderStats(data) {
+      if (!data || !data.ok) { showError(data && data.error || 'データ取得失敗'); return; }
+      document.getElementById('main').removeAttribute('aria-busy');
+      var t = data.team;
+
+      var teamHtml =
+        '<section class="stats-section">' +
+          '<h2>チーム別</h2>' +
+          '<table class="stats-table">' +
+            '<thead><tr><th>チーム</th><th>勝</th><th>負</th><th>引分</th><th>勝率</th></tr></thead>' +
+            '<tbody>' +
+              '<tr><td>' + escapeHtml(t.teamAName) + '</td><td>' + t.teamAWin + '</td><td>' + t.teamBWin + '</td><td>' + t.draw + '</td><td>' + (t.scored ? t.teamARate + '%' : '-') + '</td></tr>' +
+              '<tr><td>' + escapeHtml(t.teamBName) + '</td><td>' + t.teamBWin + '</td><td>' + t.teamAWin + '</td><td>' + t.draw + '</td><td>' + (t.scored ? t.teamBRate + '%' : '-') + '</td></tr>' +
+            '</tbody>' +
+          '</table>' +
+          '<div class="stats-meta">スコア入力済み: ' + t.scored + ' / ' + t.total + ' 試合</div>' +
+        '</section>';
+
+      var personalHtml = data.personal.length === 0
+        ? '<div class="empty">まだ集計データなし</div>'
+        : '<section class="stats-section">' +
+            '<h2>個人別</h2>' +
+            '<table class="stats-table stats-personal">' +
+              '<thead><tr><th>名前</th><th>チーム</th><th>出</th><th>勝</th><th>負</th><th>引</th><th>得</th><th>失</th><th>差</th><th>勝率</th></tr></thead>' +
+              '<tbody>' +
+                data.personal.map(function (p) {
+                  return '<tr><td>' + escapeHtml(p.name) + '</td><td>' + escapeHtml(p.team) + '</td><td>' + p.played + '</td><td>' + p.win + '</td><td>' + p.loss + '</td><td>' + p.draw + '</td><td>' + p.pf + '</td><td>' + p.pa + '</td><td>' + p.diff + '</td><td>' + (p.rate != null ? p.rate + '%' : '-') + '</td></tr>';
+                }).join('') +
+              '</tbody>' +
+            '</table>' +
+          '</section>';
+
+      document.getElementById('main').innerHTML = teamHtml + personalHtml;
+    }
+
+    // ─── 画面4: メンバー ───────────────────────────────────
+    var currentMembersData = null;
+    var currentTeamSide = 'A';
+
+    async function loadMembers() {
+      document.getElementById('page-title').textContent = 'メンバー';
+      var main = document.getElementById('main');
+      main.setAttribute('aria-busy', 'true');
+      main.innerHTML =
+        '<div class="tab-bar">' +
+          '<div class="skeleton" style="flex:1;height:40px;border-radius:8px;"></div>' +
+          '<div class="skeleton" style="flex:1;height:40px;border-radius:8px;margin-left:8px;"></div>' +
+        '</div>' +
+        '<div class="member-list">' +
+          '<div class="skeleton-card" style="flex-direction:row;height:50px;"></div>' +
+          '<div class="skeleton-card" style="flex-direction:row;height:50px;"></div>' +
+        '</div>';
+      try {
+        var data = await dbGetMembers();
+        renderMembers(data);
+      } catch (err) {
+        showError((err && err.message) || '読込エラー');
+      }
+    }
+
+    function renderMembers(data) {
+      if (!data || !data.ok) { showError(data && data.error || 'データ取得失敗'); return; }
+      currentMembersData = data;
+      document.getElementById('main').removeAttribute('aria-busy');
+
+      var teamABtn = '<button class="tab-btn ' + (currentTeamSide === 'A' ? 'active' : '') + '" onclick="switchTeam(\'A\')">' + escapeHtml(data.teamAName) + ' (' + data.teamA.length + ')</button>';
+      var teamBBtn = '<button class="tab-btn ' + (currentTeamSide === 'B' ? 'active' : '') + '" onclick="switchTeam(\'B\')">' + escapeHtml(data.teamBName) + ' (' + data.teamB.length + ')</button>';
+
+      // spec/feature-member-mix-preference-2026-05-22.md §5-1-2:
+      //   各メンバー行にミックス希望 <select> を追加（4択: 指定なし/多め/少なめ/なし）
+      //   保存は既存の collectCurrentMembers → 保存ボタン経由でまとめて行う
+      var members = currentTeamSide === 'A' ? data.teamA : data.teamB;
+      var memberRows = members.map(function (m, idx) {
+        var mp = m.mixedPreference;
+        // option の selected 判定（null は value="" に対応）
+        var opt = function (val, label) {
+          var selected = (val === '' ? mp == null : mp === val);
+          return '<option value="' + val + '"' + (selected ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+        };
+        // pm-S10 (2026-05-24 オーナー要求): 各行に予定試合数 placeholder を仕込む
+        //   - data-mname に元の名前を埋めておき、updateMembersPlannedCounts で集計値を流し込む
+        //   - 名前変更中（未保存）の場合は旧名で集計するため値は古いが、保存後の再描画で更新される
+        // pm-S10 fix (2026-05-24 FE BLOCKER-1):
+        //   role="status" + aria-live="polite" + aria-atomic="true" を付与し
+        //   集計値更新時に支援技術へ通知が届くようにする。
+        //   role/aria-* は div 要素そのものの属性なので innerHTML 上書きでも維持される。
+        return '<div class="member-row" data-idx="' + idx + '">' +
+          '<input type="text" class="member-name" value="' + escapeHtml(m.name) + '" placeholder="名前">' +
+          '<input type="number" inputmode="numeric" pattern="[0-9]*" min="1" max="10" class="member-level" value="' + (m.level != null ? m.level : '') + '" placeholder="Lv">' +
+          '<select class="member-gender">' +
+            '<option value="男"' + (m.gender === '男' ? ' selected' : '') + '>男</option>' +
+            '<option value="女"' + (m.gender === '女' ? ' selected' : '') + '>女</option>' +
+          '</select>' +
+          '<select class="member-mix-preference" aria-label="ミックス希望">' +
+            opt('',     '指定なし') +
+            opt('more', 'ミックス多め') +
+            opt('less', 'ミックス少なめ') +
+            opt('none', 'ミックスなし') +
+          '</select>' +
+          '<div class="member-stats">' + (m.win || 0) + '勝/' + (m.loss || 0) + '負</div>' +
+          '<button class="btn-delete" onclick="deleteMember(' + idx + ')" aria-label="削除">×</button>' +
+          '<div class="member-planned" data-mname="' + escapeHtml(m.name) + '"' +
+               ' role="status" aria-live="polite" aria-atomic="true">' +
+            '<span class="mp-label">予定:</span>' +
+            '<span class="mp-empty">計算中...</span>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+
+      // ミックス希望ヒント（メンバーリスト下部）
+      //   spec/feature-member-mix-preference-2026-05-22.md §5-1-4
+      var mpHint =
+        '<div class="hint" id="mp-hint" style="margin-top:8px;margin-bottom:12px;color:#6e6e73;font-size:12px;">' +
+          '「ミックスなし」を選んだメンバーはミックス試合に出ません。' +
+          '「多め」「少なめ」は希望度合いの指定です。' +
+        '</div>';
+
+      // gp-S9 fix v3 (2026-05-24 オーナー実機「予定試合数でていない」対応):
+      //   オーナー要求原文「予定試合数も生成時にメンバーの横にカテゴリーごとに記載」を
+      //   文字通り解釈し、メンバー画面にもプレビューを表示。
+      //   生成画面の #gen-preview と同じ DOM 構造を別 ID 接尾辞 -m で複製。
+      //   更新は updateMembersPreview() で行う（updateGeneratePreview と同等ロジック）。
+      var membersPreview =
+        '<section class="generate-section" id="gen-preview-m" aria-live="polite" aria-atomic="true" style="margin-top:12px;">' +
+          '<h2>予定試合数<span class="gp-rounds-label">（保存後の設定で計算 / <span id="gp-rounds-m">-</span> ラウンド合計）</span></h2>' +
+          '<div id="gp-empty-msg-m" class="hint" style="display:none;">' +
+            'メンバーを追加すると予定試合数が表示されます' +
+          '</div>' +
+          '<div id="gp-numbers-m">' +
+            '<div class="gp-row">' +
+              '<span id="gp-md-m">男ダブ -試合</span>' +
+              '<span aria-hidden="true">/</span>' +
+              '<span id="gp-fd-m">女ダブ -試合</span>' +
+              '<span aria-hidden="true">/</span>' +
+              '<span id="gp-mix-m">ミックス -試合</span>' +
+            '</div>' +
+            '<div class="gp-total-wrap">' +
+              '合計 <span id="gp-total-m">-</span> 試合' +
+            '</div>' +
+          '</div>' +
+        '</section>';
+
+      document.getElementById('main').innerHTML =
+        '<div class="tab-bar">' + teamABtn + teamBBtn + '</div>' +
+        '<div class="member-list">' + memberRows + '</div>' +
+        '<button class="btn-add" onclick="addMember()">＋ メンバーを追加</button>' +
+        mpHint +
+        membersPreview +
+        '<button class="footer-btn footer-btn-fixed" id="btn-save-members" onclick="saveMembers()">保存</button>';
+      // メンバー画面のプレビュー初期描画（保存済データから計算）
+      updateMembersPreview();
+      // pm-S10 (2026-05-24): 各メンバー行に予定試合数を流し込む（非同期で集計）
+      updateMembersPlannedCounts();
+    }
+
+    // pm-S10 (2026-05-24 オーナー要求「誰が何試合するか結果いれなくても分かる」):
+    //   生成済 rounds (未確定スコア含む) から各メンバーのカテゴリ別試合数を集計。
+    //   - 戻り値: { memberName: { MD: n, FD: n, Mix: n, MS: n, WS: n, total: n } }
+    //   - 名前が空欄 / undefined / "" のマッチスロットは無視
+    //   - 試合データは court > 0 のものだけカウント（空テンプレ行は除外）
+    async function computePlannedMatchesPerMember() {
+      var rounds = await window.store.getAll('rounds');
+      var counts = {};
+      var typeKey = function (t) {
+        var s = String(t || '');
+        if (s === 'ミックスダブルス') return 'Mix';
+        if (s === '女子ダブルス')     return 'FD';
+        if (s === '男子ダブルス')     return 'MD';
+        if (s === '男子シングルス')   return 'MS';
+        if (s === '女子シングルス')   return 'WS';
+        return 'other';
+      };
+      (rounds || []).forEach(function (r) {
+        (r.matches || []).forEach(function (m) {
+          if (!m || typeof m.court !== 'number' || m.court <= 0) return;
+          var key = typeKey(m.type);
+          ['a1', 'a2', 'b1', 'b2'].forEach(function (slot) {
+            var name = m[slot];
+            if (!name || name === '') return;
+            if (!counts[name]) counts[name] = { MD: 0, FD: 0, Mix: 0, MS: 0, WS: 0, total: 0 };
+            if (counts[name][key] == null) counts[name][key] = 0;
+            counts[name][key]++;
+            counts[name].total++;
+          });
+        });
+      });
+      return counts;
+    }
+
+    // pm-S10 (2026-05-24): 各メンバー行の .member-planned に集計値を流し込む
+    //   - DOM 走査は member-row[data-idx] ベース。data-mname に元の名前が入っているのを使う
+    //   - 名前変更中（未保存）の行は旧名で集計したものを表示するため値が古い可能性がある
+    //     → 保存後 saveMembers から renderMembers が再描画されるとき updateMembersPlannedCounts も走るので更新される
+    //   - 0 試合のメンバーは「予定: なし」表記
+    async function updateMembersPlannedCounts() {
+      var rows = document.querySelectorAll('.member-row .member-planned');
+      if (rows.length === 0) return;
+      var counts;
+      try {
+        counts = await computePlannedMatchesPerMember();
+      } catch (err) {
+        if (typeof console !== 'undefined' && console.warn) {
+          console.warn('updateMembersPlannedCounts failed:', err && err.message);
+        }
+        return;
+      }
+      rows.forEach(function (el) {
+        var name = el.getAttribute('data-mname') || '';
+        var c = counts[name] || { MD: 0, FD: 0, Mix: 0, MS: 0, WS: 0, total: 0 };
+        if (c.total === 0) {
+          el.innerHTML = '<span class="mp-label">予定:</span><span class="mp-empty">なし</span>';
+          return;
+        }
+        var parts = [];
+        if (c.MD  > 0) parts.push('<span class="mp-cat">男ダブ '   + c.MD  + '試合</span>');
+        if (c.FD  > 0) parts.push('<span class="mp-cat">女ダブ '   + c.FD  + '試合</span>');
+        if (c.Mix > 0) parts.push('<span class="mp-cat">ミックス ' + c.Mix + '試合</span>');
+        if (c.MS  > 0) parts.push('<span class="mp-cat">男シン '   + c.MS  + '試合</span>');
+        if (c.WS  > 0) parts.push('<span class="mp-cat">女シン '   + c.WS  + '試合</span>');
+        el.innerHTML =
+          '<span class="mp-label">予定:</span>' +
+          parts.join('<span aria-hidden="true">/</span>') +
+          '<span class="mp-total">合計 ' + c.total + '試合</span>';
+      });
+      if (typeof console !== 'undefined' && console.info) {
+        console.info('[member-planned] ' + rows.length + ' 行更新 / 集計対象メンバー ' + Object.keys(counts).length + ' 名');
+      }
+    }
+
+    // gp-S9 fix v3 (2026-05-24): メンバー画面側のプレビュー更新
+    //   updateGeneratePreview と同等ロジックだが ID 接尾辞 -m を使う。
+    //   メンバー画面では gen-count input がないため、cfg.plannedRounds を N として使う。
+    //   未保存の編集中メンバーは反映しない（保存後の値で計算する旨をラベルで明示）。
+    async function updateMembersPreview() {
+      var elRounds = document.getElementById('gp-rounds-m');
+      var elMD     = document.getElementById('gp-md-m');
+      var elFD     = document.getElementById('gp-fd-m');
+      var elMix    = document.getElementById('gp-mix-m');
+      var elTotal  = document.getElementById('gp-total-m');
+      var elEmpty   = document.getElementById('gp-empty-msg-m');
+      var elNumbers = document.getElementById('gp-numbers-m');
+      if (!elRounds || !elMD || !elFD || !elMix || !elTotal) return;
+      try {
+        var cfg = await dbGetConfig();
+        var n = 1;
+        if (cfg && cfg.plannedRounds != null) {
+          var nNum = Number(cfg.plannedRounds);
+          if (isFinite(nNum) && nNum >= 1) n = Math.min(50, Math.floor(nNum));
+        }
+        var all = await window.store.getAll('members');
+        var normPref = function (mp) {
+          return (mp === 'more' || mp === 'less' || mp === 'none') ? mp : null;
+        };
+        var teamA = all.filter(function (m) { return m && m.team === 'A'; }).map(function (m) {
+          return { name: m.name, level: m.level || 0,
+                   gender: m.gender === '女' ? '女' : '男',
+                   mixedPreference: normPref(m.mixedPreference) };
+        });
+        var teamB = all.filter(function (m) { return m && m.team === 'B'; }).map(function (m) {
+          return { name: m.name, level: m.level || 0,
+                   gender: m.gender === '女' ? '女' : '男',
+                   mixedPreference: normPref(m.mixedPreference) };
+        });
+        if (teamA.length === 0 && teamB.length === 0) {
+          elRounds.textContent = String(n);
+          if (elEmpty)   elEmpty.style.display = 'block';
+          if (elNumbers) elNumbers.style.display = 'none';
+          return;
+        }
+        if (elEmpty)   elEmpty.style.display = 'none';
+        if (elNumbers) elNumbers.style.display = '';
+        // 2026-05-26: プレビューも penaltyWeights 反映（実生成と完全一致させる）
+        var ctx = { courts: cfg.courtCount, teamA: teamA, teamB: teamB,
+                    categories: cfg.categories, history: [],
+                    penaltyWeights: cfg.penaltyWeights || undefined };
+        // gp-S9 fix v4 (2026-05-24 reviewer 不均衡構成 UI vs 実生成乖離対応):
+        //   updateGeneratePreview と同じ分岐モデルでメンバー画面プレビューも計算する。
+        //   詳細は updateGeneratePreview のコメント参照。
+        var hasMixedCountValue = (cfg.mixedCount != null && cfg.mixedCount !== ''
+                                  && !isNaN(Number(cfg.mixedCount)));
+        var a = 0, b = 0, c = 0;
+        if (hasMixedCountValue) {
+          var M = Number(cfg.mixedCount);
+          var maxTotal = await calculateMaxPossibleMix(n);
+          if (M > maxTotal) M = maxTotal;
+          var distribution = planMixDistribution(M, n);
+          for (var i = 0; i < n; i++) {
+            var p1R = window.TennisCore.planOptimalConfiguration_(1, ctx, { fixedMix: distribution[i] });
+            if (p1R) {
+              a += (isFinite(p1R.a) ? p1R.a : 0);
+              b += (isFinite(p1R.b) ? p1R.b : 0);
+              c += (isFinite(p1R.c) ? p1R.c : 0);
+            }
+          }
+        } else {
+          // auto モード: N 全体プランを 1 回呼ぶ (generateOne の slotPlan パスと同一)
+          var planN = window.TennisCore.planOptimalConfiguration_(n, ctx, {});
+          if (planN) {
+            a = isFinite(planN.a) ? planN.a : 0;
+            b = isFinite(planN.b) ? planN.b : 0;
+            c = isFinite(planN.c) ? planN.c : 0;
+          }
+        }
+        elRounds.textContent = String(n);
+        elMD.textContent  = '男ダブ '   + a + '試合';
+        elFD.textContent  = '女ダブ '   + b + '試合';
+        elMix.textContent = 'ミックス ' + c + '試合';
+        elTotal.textContent = String(a + b + c);
+        if (typeof console !== 'undefined' && console.info) {
+          console.info('[gp-preview-m] N=' + n + ' / A=' + teamA.length + ' B=' + teamB.length
+                       + ' / MD=' + a + ' FD=' + b + ' Mix=' + c + ' / 合計=' + (a + b + c));
+        }
+      } catch (err) {
+        if (typeof console !== 'undefined' && console.warn) {
+          console.warn('updateMembersPreview failed:', err && err.message);
+        }
+        elMD.textContent  = '男ダブ -試合';
+        elFD.textContent  = '女ダブ -試合';
+        elMix.textContent = 'ミックス -試合';
+        elTotal.textContent = '-';
+      }
+    }
+
+    function switchTeam(side) {
+      collectCurrentMembers();
+      currentTeamSide = side;
+      renderMembers(currentMembersData);
+    }
+
+    function collectCurrentMembers() {
+      if (!currentMembersData) return;
+      var rows = document.querySelectorAll('.member-row');
+      var members = [];
+      rows.forEach(function (row) {
+        var name = row.querySelector('.member-name').value.trim();
+        var levelStr = row.querySelector('.member-level').value;
+        var gender = row.querySelector('.member-gender').value;
+        // spec/feature-member-mix-preference-2026-05-22.md §5-1-2:
+        //   ミックス希望 select の現在値を取得。空文字 → null として保存
+        var mpEl = row.querySelector('.member-mix-preference');
+        var mpRaw = mpEl ? mpEl.value : '';
+        var mp = (mpRaw === 'more' || mpRaw === 'less' || mpRaw === 'none') ? mpRaw : null;
+        if (name === '') return;
+        members.push({
+          name: name,
+          level: levelStr === '' ? null : Number(levelStr),
+          gender: gender,
+          mixedPreference: mp,
+        });
+      });
+      if (currentTeamSide === 'A') currentMembersData.teamA = members;
+      else currentMembersData.teamB = members;
+    }
+
+    function addMember() {
+      collectCurrentMembers();
+      // mixedPreference 初期値は null（=指定なし）。spec §4-1 デフォルト
+      var newMember = { name: '', level: 5, gender: '男', played: 0, win: 0, loss: 0, mixedPreference: null };
+      if (currentTeamSide === 'A') currentMembersData.teamA.push(newMember);
+      else currentMembersData.teamB.push(newMember);
+      renderMembers(currentMembersData);
+    }
+
+    function deleteMember(idx) {
+      collectCurrentMembers();
+      var list = currentTeamSide === 'A' ? currentMembersData.teamA : currentMembersData.teamB;
+      var target = list[idx];
+      if (!confirm('⚠ ' + (target.name || '空欄') + ' を削除します。\n\n履歴の試合データは残ります。\n\n本当に削除しますか？')) return;
+      list.splice(idx, 1);
+      renderMembers(currentMembersData);
+    }
+
+    // チームA → チームB の順で保存
+    async function saveMembers() {
+      collectCurrentMembers();
+      var btn = document.getElementById('btn-save-members');
+      btn.disabled = true; btn.textContent = '保存中...';
+      var teamACopy = JSON.parse(JSON.stringify(currentMembersData.teamA));
+      var teamBCopy = JSON.parse(JSON.stringify(currentMembersData.teamB));
+      try {
+        await dbSaveMembers('A', teamACopy);
+        await dbSaveMembers('B', teamBCopy);
+        alert('保存しました（A: ' + teamACopy.length + '名 / B: ' + teamBCopy.length + '名）');
+        btn.disabled = false; btn.textContent = '保存';
+      } catch (err) {
+        btn.disabled = false; btn.textContent = '保存';
+        showError('保存失敗: ' + ((err && err.message) || String(err)));
+      }
+    }
+
+    // ─── 画面5: 設定 ───────────────────────────────────────
+    var currentConfig = null;
+
+    async function loadConfig() {
+      document.getElementById('page-title').textContent = '設定';
+      var main = document.getElementById('main');
+      main.setAttribute('aria-busy', 'true');
+      main.innerHTML =
+        '<div class="config-section">' +
+          '<div class="skeleton skeleton-line mid" style="height:18px;margin-bottom:12px;"></div>' +
+          '<div class="skeleton skeleton-line long" style="height:44px;margin-bottom:8px;border-radius:8px;"></div>' +
+        '</div>';
+      try {
+        var data = await dbGetConfig();
+        // spec/feature-member-mix-preference-2026-05-22.md §5-2:
+        //   個別希望に non-null が1人でもいるかを判定して、mixedCount の disabled 制御に使う
+        var allMembers = await window.store.getAll('members');
+        var hasIndivPreference = allMembers.some(function (m) {
+          var mp = m && m.mixedPreference;
+          return mp === 'more' || mp === 'less' || mp === 'none';
+        });
+        data.hasIndivPreference = hasIndivPreference;
+        // spec/feature-mixedcount-ui-2026-05-23 §2:
+        //   推奨値計算のために男女別人数を取得（A男/A女/B男/B女）
+        //   メンバー未登録でも 0/0/0/0 を入れて落ちないようにする
+        var mA = 0, fA = 0, mB = 0, fB = 0;
+        allMembers.forEach(function (m) {
+          if (!m) return;
+          if (m.team === 'A') {
+            if (m.gender === '女') fA++;
+            else mA++; // 既定 '男' 扱い
+          } else if (m.team === 'B') {
+            if (m.gender === '女') fB++;
+            else mB++;
+          }
+        });
+        data.memberCounts = { mA: mA, fA: fA, mB: mB, fB: fB };
+        renderConfig(data);
+      } catch (err) {
+        showError((err && err.message) || '読込エラー');
+      }
+    }
+
+    function renderConfig(data) {
+      if (!data || !data.ok) { showError(data && data.error || 'データ取得失敗'); return; }
+      currentConfig = data;
+      document.getElementById('main').removeAttribute('aria-busy');
+
+      var cb = function (id, label, checked) {
+        return '<label class="config-checkbox">' +
+          '<input type="checkbox" id="' + id + '"' + (checked ? ' checked' : '') + '>' +
+          '<span>' + escapeHtml(label) + '</span>' +
+          '</label>';
+      };
+
+      document.getElementById('main').innerHTML =
+        '<section class="config-section">' +
+          '<h2>基本設定</h2>' +
+          // spec/feature-mixedcount-ui-2026-05-23 §3:
+          //   コート数 / 予定ラウンド数 が変わったら推奨値を再計算（oninput で即時更新）
+          '<label class="config-row"><span>コート数</span>' +
+            '<input type="number" inputmode="numeric" pattern="[0-9]*" min="1" max="20" id="cfg-court-count" value="' + (data.courtCount || 2) + '" oninput="updateMixRecommend()">' +
+          '</label>' +
+          '<label class="config-row"><span>チームA 名前</span>' +
+            '<input type="text" id="cfg-team-a" value="' + escapeHtml(data.teamAName) + '" maxlength="30">' +
+          '</label>' +
+          '<label class="config-row"><span>チームB 名前</span>' +
+            '<input type="text" id="cfg-team-b" value="' + escapeHtml(data.teamBName) + '" maxlength="30">' +
+          '</label>' +
+          '<label class="config-row"><span>予定ラウンド数（任意）</span>' +
+            '<input type="number" inputmode="numeric" pattern="[0-9]*" min="0" max="50" id="cfg-planned" value="' + (data.plannedRounds != null ? data.plannedRounds : '') + '" placeholder="空欄=自動" oninput="updateMixRecommend()">' +
+          '</label>' +
+        '</section>' +
+
+        '<section class="config-section">' +
+          '<h2>実施するカテゴリー</h2>' +
+          cb('cfg-mens-doubles',   '男子ダブルス',     data.categories.mensDoubles) +
+          cb('cfg-womens-doubles', '女子ダブルス',     data.categories.womensDoubles) +
+          cb('cfg-mixed-doubles',  'ミックスダブルス', data.categories.mixedDoubles) +
+          cb('cfg-mens-singles',   'シングルス(男)', data.categories.mensSingles) +
+          cb('cfg-womens-singles', 'シングルス(女)', data.categories.womensSingles) +
+        '</section>' +
+
+        // 2026-05-26 オーナー指示「優先順位を UI で手動調整可能化」:
+        //   各 PENALTY 重みを設定画面から直接編集できるセクション。
+        //   hard 制約（コート空き禁止・'none' 除外・カテゴリ最低1試合）は UI 調整不可・固定。
+        //   保存ボタンを押すと dbSaveConfig → IndexedDB に penaltyWeights として書き込まれ、
+        //   次回以降のラウンド生成・プレビュー・推奨値計算でこの値が反映される。
+        //   「デフォルトに戻す」ボタンで DEFAULT_PENALTY_WEIGHTS の値に一括復帰可能。
+        //
+        // 2026-05-26 オーナー差し戻し（hard 固定化）:
+        //   「カテゴリ最低1試合 はマストなので最優先に常においておくこと（設定画面から非表示）」
+        //   → 入力欄を削除。tennis-core.js の effectivePenalty で常に 1000000 を強制する。
+        '<section class="config-section" id="cfg-algorithm-section">' +
+          '<h2>アルゴリズム調整 (優先順位の重み)</h2>' +
+          '<p class="hint" style="margin-bottom:10px;">各項目の数値が大きいほど優先されます。コート空き禁止・「ミックスなし」除外・カテゴリ最低1試合は固定 (変更不可)。</p>' +
+          '<label class="config-row"><span>試合数均等</span>' +
+            '<input type="number" inputmode="numeric" pattern="[0-9]*" min="0" max="999999" id="cfg-pen-member-gap" value="' + Number(data.penaltyWeights.MEMBER_GAP_WEIGHT) + '">' +
+          '</label>' +
+          '<label class="config-row"><span>重複ペア排除</span>' +
+            '<input type="number" inputmode="numeric" pattern="[0-9]*" min="0" max="999999" id="cfg-pen-duplicate-pair" value="' + Number(data.penaltyWeights.DUPLICATE_PAIR_PENALTY) + '">' +
+          '</label>' +
+          '<label class="config-row"><span>ペア多様性 (累計)</span>' +
+            '<input type="number" inputmode="numeric" pattern="[0-9]*" min="0" max="99999" id="cfg-pen-same-pair" value="' + Number(data.penaltyWeights.SAME_PAIR) + '">' +
+          '</label>' +
+          '<label class="config-row"><span>ペア多様性 (直近Nラウンド)</span>' +
+            '<input type="number" inputmode="numeric" pattern="[0-9]*" min="0" max="99999" id="cfg-pen-recent-pair" value="' + Number(data.penaltyWeights.RECENT_PAIR_PENALTY) + '">' +
+          '</label>' +
+          '<label class="config-row"><span>対戦かぶり (累計ペア)</span>' +
+            '<input type="number" inputmode="numeric" pattern="[0-9]*" min="0" max="99999" id="cfg-pen-same-opp-pair" value="' + Number(data.penaltyWeights.SAME_OPPONENT_PAIR) + '">' +
+          '</label>' +
+          '<label class="config-row"><span>対戦かぶり (累計個人)</span>' +
+            '<input type="number" inputmode="numeric" pattern="[0-9]*" min="0" max="99999" id="cfg-pen-same-opp-indiv" value="' + Number(data.penaltyWeights.SAME_OPPONENT_INDIV) + '">' +
+          '</label>' +
+          '<label class="config-row"><span>連続休憩</span>' +
+            '<input type="number" inputmode="numeric" pattern="[0-9]*" min="0" max="99999" id="cfg-pen-consec-skip" value="' + Number(data.penaltyWeights.CONSECUTIVE_SKIP_PENALTY) + '">' +
+          '</label>' +
+          '<label class="config-row"><span>ミックス希望</span>' +
+            '<input type="number" inputmode="numeric" pattern="[0-9]*" min="0" max="9999" id="cfg-pen-mix-pref" value="' + Number(data.penaltyWeights.MIX_PREFER_BONUS) + '">' +
+          '</label>' +
+          '<label class="config-row"><span>level差</span>' +
+            '<input type="number" inputmode="numeric" pattern="[0-9]*" min="0" max="9999" id="cfg-pen-level-diff" value="' + Number(data.penaltyWeights.LEVEL_DIFF) + '">' +
+          '</label>' +
+          '<button class="generate-btn" type="button" id="btn-reset-algorithm" onclick="resetAlgorithmDefaults()" style="margin-top:8px;">デフォルトに戻す</button>' +
+        '</section>' +
+
+        // gm-S11 (2026-05-24 オーナー仕様変更):
+        //   「ミックスの推奨値は男女の数と希望から判断して。なので設定にいれるのではなく生成時に選択」
+        //   → 設定画面のミックス試合数セクションは削除。生成画面 (loadGenerate) で都度入力する。
+        //   後方互換: dbGetConfig/dbSaveConfig 自体は data.mixedCount を読み書きできるため
+        //     既存テスト (setupDiv4x4(page, { mixedCount: 3 })) は IndexedDB 経由で保存され
+        //     generateOne の hasMixedCount 分岐パスがそのまま動く。
+        //   旧仕様の関連実装 (calculateRecommendedMix / updateMixRecommend) は
+        //   生成画面側で再利用するため保持する。
+
+        // ADR-001 R1: データ移行セクション（JSON エクスポート / インポート）
+        '<section class="config-section" id="cfg-io-section">' +
+          '<h2>データ移行（JSONバックアップ）</h2>' +
+          '<p class="hint" style="margin-bottom:10px;">全データ（設定・メンバー・ラウンド・履歴）を1ファイルに書き出し／読み戻しします。端末間移動や復元用。</p>' +
+          '<div style="display:flex;flex-direction:column;gap:10px;">' +
+            '<button type="button" class="generate-btn" id="btn-export-json" onclick="exportAllJson()">📤 全データJSONエクスポート</button>' +
+            '<button type="button" class="generate-btn" id="btn-import-json" onclick="triggerImportJson()">📥 JSONからインポート</button>' +
+            '<input type="file" id="input-import-json" accept="application/json,.json" style="display:none;" onchange="handleImportJsonFile(event)">' +
+          '</div>' +
+        '</section>' +
+
+        '<button class="footer-btn footer-btn-fixed" id="btn-save-config" onclick="saveConfig(false)">保存</button>';
+
+      // gm-S11 (2026-05-24): ミックス試合数は設定画面から削除されたため
+      //   updateMixRecommend() の呼出も不要（関数は生成画面側で利用するため保持）。
+    }
+
+    // ─── spec/feature-mixedcount-ui-2026-05-23 §2: 推奨値計算（純関数）
+    //   N: 予定ラウンド数（空欄なら 5 を仮定。オーナー指摘の体感値）
+    //   courts: コート数
+    //   counts: { mA, fA, mB, fB }（A男/A女/B男/B女）
+    //   返り値: { value, totalSlots, maxPossible, courts, N, note }
+    //   ロジック:
+    //     - maxMixPerRound = min(mA, fA, mB, fB)  ※ A男×B女 / B男×A女 の両ペアが組める最大数
+    //     - totalSlots = N * courts
+    //     - maxPossible = min(maxMixPerRound * N, totalSlots)
+    //     - 推奨値 = round(totalSlots * 0.5) を上限 maxPossible でクランプ
+    //     - 男女混成ペアが組めない (maxMixPerRound === 0) → value=0
+    function calculateRecommendedMix(counts, courts, N) {
+      var mA = Number(counts && counts.mA) || 0;
+      var fA = Number(counts && counts.fA) || 0;
+      var mB = Number(counts && counts.mB) || 0;
+      var fB = Number(counts && counts.fB) || 0;
+      var c = Number(courts) > 0 ? Math.floor(Number(courts)) : 2;
+      var n = Number(N) > 0 ? Math.floor(Number(N)) : 5;
+      var maxMixPerRound = Math.min(mA, fA, mB, fB);
+      var totalSlots = n * c;
+      if (maxMixPerRound === 0) {
+        return {
+          value: 0,
+          totalSlots: totalSlots,
+          maxPossible: 0,
+          courts: c,
+          N: n,
+          note: '男女混成ペアを組める人員が不足（A男/A女/B男/B女のいずれかが0人）',
+        };
+      }
+      var maxPossible = Math.min(maxMixPerRound * n, totalSlots);
+      var half = Math.round(totalSlots * 0.5);
+      var recommended = Math.min(maxPossible, half);
+      if (recommended < 0) recommended = 0;
+      return {
+        value: recommended,
+        totalSlots: totalSlots,
+        maxPossible: maxPossible,
+        courts: c,
+        N: n,
+        note: '',
+      };
+    }
+
+    // ─── spec/feature-mixedcount-ui-2026-05-23 §3:
+    //   cfg-court-count / cfg-planned の oninput で呼ばれる
+    //   currentConfig.memberCounts を使って推奨値を再計算 → #cfg-mix-recommend を書き換え
+    function updateMixRecommend() {
+      var elRec = document.getElementById('cfg-mix-recommend');
+      if (!elRec) return; // 設定画面でない / 描画前
+      var courts = 2, planned = 5;
+      var elCourt = document.getElementById('cfg-court-count');
+      var elPlanned = document.getElementById('cfg-planned');
+      if (elCourt && elCourt.value !== '') courts = Number(elCourt.value) || 2;
+      if (elPlanned && elPlanned.value !== '') planned = Number(elPlanned.value) || 5;
+      var counts = (currentConfig && currentConfig.memberCounts) || { mA: 0, fA: 0, mB: 0, fB: 0 };
+      var rec = calculateRecommendedMix(counts, courts, planned);
+      var lines = [];
+      // 3者判定 M-5: color はインラインで指定せず CSS クラス (.mix-recommend-box span) に委譲
+      //              → ダークモードで自動的に切り替わる
+      lines.push('推奨値: <strong>' + rec.value + ' 回</strong>');
+      if (rec.note) {
+        lines.push('<span style="font-size:12px;">（' + escapeHtml(rec.note) + '）</span>');
+      } else {
+        lines.push('<span style="font-size:12px;">（' + rec.N + 'ラウンド × コート' + rec.courts + ' = 全' + rec.totalSlots + '試合のうち約半分）</span>');
+      }
+      lines.push('<span style="font-size:11px;display:block;margin-top:4px;">物理上限: ' + rec.maxPossible + ' 回 / 全試合数: ' + rec.totalSlots + '</span>');
+      // メンバー数の内訳（オーナーが「人数がわかると判断できる」と分かるように）
+      lines.push('<span style="font-size:11px;display:block;">メンバー: A男' + counts.mA + '/A女' + counts.fA + '/B男' + counts.mB + '/B女' + counts.fB + '</span>');
+      elRec.innerHTML = lines.join('<br>');
+    }
+
+    // ─── R1: JSON エクスポート（window.io.exportAll → Blob ダウンロード）
+    async function exportAllJson() {
+      var btn = document.getElementById('btn-export-json');
+      if (btn) { btn.disabled = true; btn.textContent = '書き出し中...'; }
+      try {
+        var jsonStr = await window.io.exportAll();
+        // ファイル名: tennis-export-YYYYMMDD-HHMM.json
+        var now = new Date();
+        var pad = function (n) { return n < 10 ? '0' + n : '' + n; };
+        var fname = 'tennis-export-' +
+          now.getFullYear() + pad(now.getMonth() + 1) + pad(now.getDate()) + '-' +
+          pad(now.getHours()) + pad(now.getMinutes()) + '.json';
+        var blob = new Blob([jsonStr], { type: 'application/json' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = fname;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        // メモリリーク回避のため少し待ってから revoke
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+        if (btn) { btn.disabled = false; btn.textContent = '📤 全データJSONエクスポート'; }
+        alert('エクスポート完了: ' + fname);
+      } catch (err) {
+        if (btn) { btn.disabled = false; btn.textContent = '📤 全データJSONエクスポート'; }
+        alert('エクスポート失敗: ' + ((err && err.message) || String(err)));
+      }
+    }
+
+    // ─── R1: JSON インポート（file input をプログラム的に開く）
+    function triggerImportJson() {
+      if (!confirm('既存データを全置換します。よろしいですか？\n\n念のため事前にエクスポートでバックアップを取ることを推奨します。')) return;
+      var input = document.getElementById('input-import-json');
+      if (input) {
+        input.value = ''; // 同じファイル再選択時にも change が発火するようリセット
+        input.click();
+      }
+    }
+
+    // ─── R1: ファイル選択後に呼ばれる onchange ハンドラ
+    async function handleImportJsonFile(event) {
+      var input = event && event.target;
+      var files = input && input.files;
+      if (!files || files.length === 0) return;
+      var file = files[0];
+      var btn = document.getElementById('btn-import-json');
+      if (btn) { btn.disabled = true; btn.textContent = '読み込み中...'; }
+      try {
+        // FileReader でテキストとして読む（file:// + IndexedDB 環境で安定）
+        var text = await new Promise(function (resolve, reject) {
+          var fr = new FileReader();
+          fr.onload = function () { resolve(String(fr.result || '')); };
+          fr.onerror = function () { reject(new Error('ファイル読み込みエラー')); };
+          fr.readAsText(file, 'utf-8');
+        });
+        await window.io.importAll(text);
+        if (btn) { btn.disabled = false; btn.textContent = '📥 JSONからインポート'; }
+        alert('インポート完了。ラウンド一覧画面に移動します。');
+        navigateTo('#view=rounds');
+      } catch (err) {
+        if (btn) { btn.disabled = false; btn.textContent = '📥 JSONからインポート'; }
+        alert('インポート失敗: ' + ((err && err.message) || String(err)));
+      }
+    }
+
+    function collectConfig() {
+      // gm-S11 fix (2026-05-24): 要素削除に伴い null 安全化
+      //   旧: document.getElementById(id).value → 要素なしで TypeError
+      //   新: 要素なし → 空文字を返す（呼出元 v('cfg-mixed-count') 等で null 判定が効く）
+      var v = function (id) { var el = document.getElementById(id); return el ? el.value : ''; };
+      var c = function (id) { var el = document.getElementById(id); return el ? el.checked : false; };
+      // 2026-05-26: アルゴリズム重み収集
+      //   各 input から数値を読み、空欄/NaN は currentConfig.penaltyWeights のフォールバックを使う。
+      //   currentConfig が無い（初回読込前など）場合は DEFAULT_PENALTY_WEIGHTS を使う。
+      var curPW = (currentConfig && currentConfig.penaltyWeights) || DEFAULT_PENALTY_WEIGHTS;
+      var readPW = function (id, key) {
+        var raw = v(id);
+        if (raw === '' || raw == null) return curPW[key];
+        var n = Number(raw);
+        return isNaN(n) ? curPW[key] : n;
+      };
+      // 「試合数均等」スライダ 1 つで MEMBER_GAP_WEIGHT と SKIP_MIN_PLAY を一括変更
+      //   （同じ「試合数均等」優先カテゴリだから・spec の優先順位 5 位に対応）
+      var memberGap = readPW('cfg-pen-member-gap', 'MEMBER_GAP_WEIGHT');
+      // 「ミックス希望」スライダ 1 つで MIX_PREFER_BONUS と MIX_AVOID_PENALTY を一括変更
+      //   （ともに same scale で more/less のおまけ補正に使う）
+      var mixPref = readPW('cfg-pen-mix-pref', 'MIX_PREFER_BONUS');
+      // 「対戦かぶり (累計ペア)」スライダ 1 つで SAME_OPPONENT_PAIR と RECENT_OPPONENT_PENALTY を一括変更
+      //   （RECENT は累計ペアより僅かに重い同カテゴリ）
+      var sameOppPair = readPW('cfg-pen-same-opp-pair', 'SAME_OPPONENT_PAIR');
+      // 「対戦かぶり (累計個人)」スライダ 1 つで SAME_OPPONENT_INDIV と RECENT_OPPONENT_INDIV_PENALTY を一括変更
+      var sameOppIndiv = readPW('cfg-pen-same-opp-indiv', 'SAME_OPPONENT_INDIV');
+      return {
+        courtCount:    Number(v('cfg-court-count')) || 2,
+        teamAName:     v('cfg-team-a').trim(),
+        teamBName:     v('cfg-team-b').trim(),
+        plannedRounds: v('cfg-planned') === '' ? null : Number(v('cfg-planned')),
+        categories: {
+          mensDoubles:   c('cfg-mens-doubles'),
+          womensDoubles: c('cfg-womens-doubles'),
+          mixedDoubles:  c('cfg-mixed-doubles'),
+          mensSingles:   c('cfg-mens-singles'),
+          womensSingles: c('cfg-womens-singles'),
+        },
+        // gm-S11 (2026-05-24): mixedCount は設定画面から削除されたため
+        //   collectConfig では既存の保存値を読まずに維持する (currentConfig.mixedCount フォールバック)。
+        //   これにより既存テスト (setupDiv4x4(page, { mixedCount: 3 })) で IndexedDB に
+        //   直接書かれた mixedCount は設定画面の保存操作後も保持される。
+        //   生成画面の input (#gen-mixed-count) は generateOne 側で別途読まれる。
+        mixedCount: (currentConfig && currentConfig.mixedCount != null) ? currentConfig.mixedCount : null,
+        // 2026-05-26: アルゴリズム重み（UI で手動調整した値を含む）
+        //   CATEGORY_ZERO_PENALTY は hard 固定（オーナー指示・UI 非表示）のため保存しない。
+        //   tennis-core.js の effectivePenalty で常に PENALTY デフォルト値 (1000000) が強制される。
+        penaltyWeights: {
+          MEMBER_GAP_WEIGHT:             memberGap,
+          SKIP_MIN_PLAY:                 memberGap,
+          DUPLICATE_PAIR_PENALTY:        readPW('cfg-pen-duplicate-pair', 'DUPLICATE_PAIR_PENALTY'),
+          SAME_PAIR:                     readPW('cfg-pen-same-pair', 'SAME_PAIR'),
+          RECENT_PAIR_PENALTY:           readPW('cfg-pen-recent-pair', 'RECENT_PAIR_PENALTY'),
+          SAME_OPPONENT_PAIR:            sameOppPair,
+          RECENT_OPPONENT_PENALTY:       sameOppPair,
+          SAME_OPPONENT_INDIV:           sameOppIndiv,
+          RECENT_OPPONENT_INDIV_PENALTY: sameOppIndiv,
+          CONSECUTIVE_SKIP_PENALTY:      readPW('cfg-pen-consec-skip', 'CONSECUTIVE_SKIP_PENALTY'),
+          MIX_PREFER_BONUS:              mixPref,
+          MIX_AVOID_PENALTY:             mixPref,
+          LEVEL_DIFF:                    readPW('cfg-pen-level-diff', 'LEVEL_DIFF'),
+        },
+      };
+    }
+
+    // 2026-05-26 オーナー指示「優先順位を UI で手動調整可能化」:
+    //   アルゴリズム調整セクションの各入力欄を DEFAULT_PENALTY_WEIGHTS の値に一括リセット。
+    //   ※ リセットボタン押下時点では UI 入力欄のみ書き換える（IndexedDB には書かない）。
+    //     保存ボタンを押して dbSaveConfig 経由で初めて IndexedDB に反映される（既存挙動と整合）。
+    function resetAlgorithmDefaults() {
+      var setVal = function (id, val) {
+        var el = document.getElementById(id);
+        if (el) el.value = String(val);
+      };
+      setVal('cfg-pen-member-gap',     DEFAULT_PENALTY_WEIGHTS.MEMBER_GAP_WEIGHT);
+      // CATEGORY_ZERO_PENALTY は hard 固定（UI 非表示）のためリセット対象外
+      setVal('cfg-pen-duplicate-pair', DEFAULT_PENALTY_WEIGHTS.DUPLICATE_PAIR_PENALTY);
+      setVal('cfg-pen-same-pair',      DEFAULT_PENALTY_WEIGHTS.SAME_PAIR);
+      setVal('cfg-pen-recent-pair',    DEFAULT_PENALTY_WEIGHTS.RECENT_PAIR_PENALTY);
+      setVal('cfg-pen-same-opp-pair',  DEFAULT_PENALTY_WEIGHTS.SAME_OPPONENT_PAIR);
+      setVal('cfg-pen-same-opp-indiv', DEFAULT_PENALTY_WEIGHTS.SAME_OPPONENT_INDIV);
+      setVal('cfg-pen-consec-skip',    DEFAULT_PENALTY_WEIGHTS.CONSECUTIVE_SKIP_PENALTY);
+      setVal('cfg-pen-mix-pref',       DEFAULT_PENALTY_WEIGHTS.MIX_PREFER_BONUS);
+      setVal('cfg-pen-level-diff',     DEFAULT_PENALTY_WEIGHTS.LEVEL_DIFF);
+    }
+
+    async function saveConfig(force) {
+      var config = collectConfig();
+      // クライアントサイドバリデーション
+      if (!config.courtCount || config.courtCount < 1 || config.courtCount > 20) {
+        alert('コート数は 1〜20 で入力してください'); return;
+      }
+      if (!config.teamAName) { alert('チームA名を入力してください'); return; }
+      if (!config.teamBName) { alert('チームB名を入力してください'); return; }
+      var cats = config.categories;
+      if (!cats.mensDoubles && !cats.womensDoubles && !cats.mixedDoubles && !cats.mensSingles && !cats.womensSingles) {
+        alert('カテゴリーを最低1つ選択してください'); return;
+      }
+
+      var btn = document.getElementById('btn-save-config');
+      btn.disabled = true; btn.textContent = '保存中...';
+      try {
+        var res = await dbSaveConfig(config, force ? 'true' : 'false');
+        btn.disabled = false; btn.textContent = '保存';
+        alert('設定を保存しました');
+        if (res.turnedOff && res.turnedOff.length > 0) {
+          console.log('OFFになったカテゴリー: ' + res.turnedOff.join(', '));
+        }
+      } catch (err) {
+        btn.disabled = false; btn.textContent = '保存';
+        var msg = (err && err.message) || String(err);
+        if (!force && /履歴に該当カテゴリー/.test(msg)) {
+          if (confirm('注意: ' + msg + '\n\n強制保存しますか？\n（過去履歴は残りますが、新規ラウンド生成では使われません）')) {
+            saveConfig(true);
+          }
+        } else {
+          alert('保存失敗: ' + msg);
+        }
+      }
+    }
+
+    // ─── 画面6: ラウンド生成 ────────────────────────────────
+    // S8: 生成画面でラウンド数を指定できるようにする
+    //   - 初期値: config.plannedRounds（≧1 の整数）/ 未設定なら 1
+    //   - 範囲: 1〜50（min/max + クランプ）
+    //   - generateOne() / generateCustom() を N ループ化
+    //   - 途中失敗時は (M-1) 回までは DB に残し、エラーアラート → 一覧へ遷移
+    async function loadGenerate() {
+      document.getElementById('page-title').textContent = 'ラウンド生成';
+      var main = document.getElementById('main');
+      main.setAttribute('aria-busy', 'true');
+      main.innerHTML =
+        '<div class="generate-section">' +
+          '<div class="skeleton skeleton-line long" style="height:20px;margin-bottom:8px;"></div>' +
+          '<div class="skeleton skeleton-line mid" style="height:14px;"></div>' +
+        '</div>';
+      try {
+        var rounds = await dbGetRounds();
+        var nextRound = (rounds && rounds.length > 0
+          ? Math.max.apply(null, rounds.map(function (r) { return r.round; })) + 1
+          : 1);
+        // S8: 設定の plannedRounds を初期値ソースとして取得（null / 0以下 / 非数値 はフォールバック 1）
+        var cfg = await dbGetConfig();
+        var initialN = 1;
+        if (cfg && cfg.plannedRounds != null) {
+          var nNum = Number(cfg.plannedRounds);
+          if (isFinite(nNum) && nNum >= 1) {
+            initialN = Math.min(50, Math.floor(nNum));
+          }
+        }
+        document.getElementById('main').removeAttribute('aria-busy');
+        document.getElementById('main').innerHTML =
+          '<section class="generate-section">' +
+            '<h2>次のラウンド番号: 第' + nextRound + 'ラウンド</h2>' +
+            '<p class="hint">設定とメンバーは事前に確認してください</p>' +
+          '</section>' +
+
+          // S8: ラウンド数指定セクション
+          // S8 fix (reviewer指摘): oninput="updateGenerateLabels()" でボタン文言を動的更新
+          // gp-S9 (2026-05-24): oninput で updateGeneratePreview() も呼ぶ（予定試合数プレビュー動的更新）
+          '<section class="generate-section">' +
+            '<h2>生成ラウンド数</h2>' +
+            '<p class="hint">設定の予定ラウンド数を初期値として表示。1〜50</p>' +
+            '<div class="multi-row">' +
+              '<input type="number" inputmode="numeric" pattern="[0-9]*" min="1" max="50" step="1" id="gen-count" value="' + initialN + '" aria-label="生成ラウンド数" oninput="updateGenerateLabels(); updateGeneratePreview(); updateAllGenRecommendations();">' +
+            '</div>' +
+          '</section>' +
+
+          // gp-S9 (2026-05-24): 予定試合数プレビュー（カテゴリ別＋合計）
+          //   - planOptimalConfiguration_(N, ctx, opts) を呼んで {a, b, c} を取得し表示
+          //   - mixedCount HARD 指定がある場合は c を fixedMix にそろえる（dbGenerateRound 互換）
+          //   - 「自動で生成」ボタンの直上に置き、ユーザーが N を変えたら即時再計算
+          // gp-S9 fix v3 (2026-05-24 オーナー実機「予定試合数でていない」対応):
+          //   - h2 を style 14px → 通常サイズに戻し見落とし防止
+          //   - ラベルを「予定試合数 (1R)」→「予定試合数（X ラウンド合計）」と説明的に
+          //   - メンバー 0 人時は専用メッセージ #gp-empty-msg を表示し #gp-numbers を隠す
+          //   - aria-atomic="true": 値変化時にスクリーンリーダーで全体読上げ
+          //   - .gp-row: flex-wrap で狭幅折返し
+          //   - .gp-total-wrap + #gp-total に大きめフォント・アクセントカラー
+          // gm-S11 (2026-05-24 オーナー仕様変更): 生成画面に「ミックス試合数」セクションを新設
+          //   - 推奨値ボックス: 男女数・希望から自動算出 (calculateGenMixRecommend)
+          //   - 入力欄 #gen-mixed-count: 空欄なら推奨値を使う（placeholder で明示）
+          //   - 「推奨値を入力欄に反映」ボタン: ワンクリックで input に値をセット
+          //   - oninput で updateGeneratePreview() を呼び、プレビューに即時反映
+          //   - aria-live: 推奨値ボックスはスクリーンリーダ対応
+          //
+          // gm-S12 (2026-05-25 オーナー追加仕様): 男ダブ・女ダブも生成時に試合数指定可能に
+          //   - ミックスと同じ UI パターン: 推奨値ボックス + input + 反映ボタン
+          //   - 推奨値は planOptimalConfiguration_(N, ctx, {}) の {a, b, c} から
+          //     a (男ダブ推奨) / b (女ダブ推奨) を取得
+          //   - 空欄なら推奨値が使われる (generateOne 内で fixedMD/fixedFD=null として渡す)
+          //   - 数値なら HARD 制約として絶対化する
+          '<section class="generate-section" id="gen-md-section">' +
+            '<h2>男子ダブルス試合数</h2>' +
+            '<p class="hint" style="margin-bottom:10px;font-size:13px;">' +
+              'この回の男ダブ試合数を指定します。空欄なら推奨値（男女の数と希望から自動算出）を使います。<br>' +
+              '<span style="font-size:12px;">※「実施するカテゴリー」で <strong>男子ダブルス</strong> がオフだと適用されません。</span>' +
+            '</p>' +
+            '<div class="hint mix-recommend-box" id="gen-md-recommend" role="status" aria-live="polite" aria-atomic="true">推奨値: 計算中...</div>' +
+            '<label class="config-row"><span>男ダブ試合数</span>' +
+              '<input type="number" inputmode="numeric" pattern="[0-9]*" min="0" max="99" id="gen-md-count" value="" placeholder="空欄=推奨値を使用" oninput="updateGeneratePreview()">' +
+            '</label>' +
+            '<button class="generate-btn" id="btn-apply-md-recommend" type="button" onclick="applyMDRecommend()" style="margin-top:8px;">推奨値を入力欄に反映</button>' +
+          '</section>' +
+
+          '<section class="generate-section" id="gen-fd-section">' +
+            '<h2>女子ダブルス試合数</h2>' +
+            '<p class="hint" style="margin-bottom:10px;font-size:13px;">' +
+              'この回の女ダブ試合数を指定します。空欄なら推奨値を使います。<br>' +
+              '<span style="font-size:12px;">※「実施するカテゴリー」で <strong>女子ダブルス</strong> がオフだと適用されません。</span>' +
+            '</p>' +
+            '<div class="hint mix-recommend-box" id="gen-fd-recommend" role="status" aria-live="polite" aria-atomic="true">推奨値: 計算中...</div>' +
+            '<label class="config-row"><span>女ダブ試合数</span>' +
+              '<input type="number" inputmode="numeric" pattern="[0-9]*" min="0" max="99" id="gen-fd-count" value="" placeholder="空欄=推奨値を使用" oninput="updateGeneratePreview()">' +
+            '</label>' +
+            '<button class="generate-btn" id="btn-apply-fd-recommend" type="button" onclick="applyFDRecommend()" style="margin-top:8px;">推奨値を入力欄に反映</button>' +
+          '</section>' +
+
+          '<section class="generate-section" id="gen-mix-section">' +
+            '<h2>ミックス試合数</h2>' +
+            '<p class="hint" style="margin-bottom:10px;font-size:13px;">' +
+              'この回のミックス試合数を指定します。空欄なら推奨値（男女の数と希望から自動算出）を使います。<br>' +
+              '<span style="font-size:12px;">※「実施するカテゴリー」で <strong>ミックスダブルス</strong> がオフだと適用されません。</span>' +
+            '</p>' +
+            '<div class="hint mix-recommend-box" id="gen-mix-recommend" role="status" aria-live="polite" aria-atomic="true">推奨値: 計算中...</div>' +
+            '<label class="config-row"><span>ミックス試合数</span>' +
+              '<input type="number" inputmode="numeric" pattern="[0-9]*" min="0" max="99" id="gen-mixed-count" value="" placeholder="空欄=推奨値を使用" oninput="updateGeneratePreview()">' +
+            '</label>' +
+            '<button class="generate-btn" id="btn-apply-recommend" type="button" onclick="applyMixRecommend()" style="margin-top:8px;">推奨値を入力欄に反映</button>' +
+          '</section>' +
+
+          '<section class="generate-section" id="gen-preview" aria-live="polite" aria-atomic="true">' +
+            '<h2>予定試合数<span class="gp-rounds-label">（<span id="gp-rounds">' + initialN + '</span> ラウンド合計）</span></h2>' +
+            '<div id="gp-empty-msg" class="hint" style="display:none;">' +
+              'メンバーを追加すると予定試合数が表示されます' +
+            '</div>' +
+            '<div id="gp-numbers">' +
+              '<div class="gp-row">' +
+                '<span id="gp-md">男ダブ -試合</span>' +
+                '<span aria-hidden="true">/</span>' +
+                '<span id="gp-fd">女ダブ -試合</span>' +
+                '<span aria-hidden="true">/</span>' +
+                '<span id="gp-mix">ミックス -試合</span>' +
+              '</div>' +
+              '<div class="gp-total-wrap">' +
+                '合計 <span id="gp-total">-</span> 試合' +
+              '</div>' +
+            '</div>' +
+          '</section>' +
+
+          '<div class="generate-actions">' +
+            '<button class="generate-btn primary" id="btn-generate-auto" onclick="generateOne()">&#9654; 自動で生成</button>' +
+            '<button class="generate-btn" id="btn-generate-custom" onclick="generateCustom()">&#9999; 空テンプレで作成</button>' +
+          '</div>';
+        // S8 fix (reviewer指摘): 初期描画直後に initialN ぶんを反映
+        updateGenerateLabels();
+        // gp-S9: 初期描画直後にプレビューも反映（async だが await しない＝描画ブロック回避）
+        updateGeneratePreview();
+        // gm-S11/S12 + 2026-05-25 推奨値合計バグ対応:
+        //   3つの推奨値ボックスを統一計算で同時更新（plan.{a,b,c} ベース）
+        updateAllGenRecommendations();
+      } catch (err) {
+        showError((err && err.message) || '読込エラー');
+      }
+    }
+
+    // S8 fix (reviewer指摘・受入条件2): 入力欄の値に応じてボタンラベルを動的更新
+    //   - N が 1〜50 の整数 → 「▶ 自動でNラウンド生成」「✎ 空テンプレでNラウンド作成」
+    //   - 空欄 / 0以下 / 非数値 / 50超 / 小数 → 「▶ 自動で生成」「✎ 空テンプレで作成」（数字なしフォールバック）
+    function updateGenerateLabels() {
+      var elInput = document.getElementById('gen-count');
+      var btnAuto = document.getElementById('btn-generate-auto');
+      var btnCustom = document.getElementById('btn-generate-custom');
+      if (!btnAuto || !btnCustom) return;
+      var raw = elInput ? elInput.value : '';
+      var n = NaN;
+      if (raw !== '' && raw != null) n = Number(raw);
+      var hasValidN = isFinite(n) && n >= 1 && n <= 50 && Math.floor(n) === n;
+      // ▶ = &#9654; / ✎ = &#9999; を実体文字で固定（textContent に直接設定するため HTML エスケープ不要）
+      var arrow = '▶'; // ▶
+      var pencil = '✎'; // ✎
+      if (hasValidN) {
+        btnAuto.textContent = arrow + ' 自動で' + n + 'ラウンド生成';
+        btnCustom.textContent = pencil + ' 空テンプレで' + n + 'ラウンド作成';
+      } else {
+        btnAuto.textContent = arrow + ' 自動で生成';
+        btnCustom.textContent = pencil + ' 空テンプレで作成';
+      }
+    }
+
+    // S8: 入力欄から N を取得して 1〜50 にクランプ。空欄や非数値は 1 として扱う
+    function readGenerateCount() {
+      var el = document.getElementById('gen-count');
+      if (!el) return 1;
+      var raw = el.value;
+      if (raw === '' || raw == null) return 1;
+      var n = Number(raw);
+      if (!isFinite(n) || n < 1) return 0; // 0 を返して呼出元でアラート
+      if (n > 50) return -1;                // -1 を返して呼出元でアラート
+      return Math.floor(n);
+    }
+
+    // gp-S9 (2026-05-24): 予定試合数プレビューを再計算して DOM に反映
+    //   - planOptimalConfiguration_(N, ctx, opts) を呼んで {a, b, c} を取得
+    //   - mixedCount に有効な数値があれば fixedMix としてそれを渡す（dbGenerateRound 互換 ②パス）
+    //   - 失敗時は数値部のみ "-" 表示にしてサイレントフォールバック（UI を壊さない）
+    //   - 表示専用なので Round 数が不正でも 1 を仮置きして計算
+    // gp-S9 fix v3 (2026-05-24 オーナー実機「予定試合数でていない」対応):
+    //   - メンバー 0 人時は数値ブロック #gp-numbers を hide し #gp-empty-msg を表示
+    //   - 実機デバッグ用に console.info で観測値をダンプ (devtools console で常に確認可能)
+    //   - 要素未存在時もデバッグログを出して画面遷移漏れを検出
+    async function updateGeneratePreview() {
+      // 要素存在チェック（loadGenerate 以外の view ではスキップ）
+      var elRounds = document.getElementById('gp-rounds');
+      var elMD     = document.getElementById('gp-md');
+      var elFD     = document.getElementById('gp-fd');
+      var elMix    = document.getElementById('gp-mix');
+      var elTotal  = document.getElementById('gp-total');
+      var elEmpty   = document.getElementById('gp-empty-msg');
+      var elNumbers = document.getElementById('gp-numbers');
+      if (!elRounds || !elMD || !elFD || !elMix || !elTotal) {
+        // gp-S9 fix v3: 実機デバッグ用に要素未存在を明示
+        if (typeof console !== 'undefined' && console.info) {
+          console.info('[gp-preview] DOM 要素未存在のためスキップ (loadGenerate 未経由の view)');
+        }
+        return;
+      }
+      try {
+        var nRaw = readGenerateCount();
+        // 空欄(0)・>50(-1) でも表示用には 1 にクランプ
+        var n = (nRaw && nRaw >= 1) ? nRaw : 1;
+        var cfg = await dbGetConfig();
+        var all = await window.store.getAll('members');
+        var normPref = function (mp) {
+          return (mp === 'more' || mp === 'less' || mp === 'none') ? mp : null;
+        };
+        var teamA = all.filter(function (m) { return m && m.team === 'A'; }).map(function (m) {
+          return {
+            name: m.name,
+            level: m.level || 0,
+            gender: m.gender === '女' ? '女' : '男',
+            mixedPreference: normPref(m.mixedPreference),
+          };
+        });
+        var teamB = all.filter(function (m) { return m && m.team === 'B'; }).map(function (m) {
+          return {
+            name: m.name,
+            level: m.level || 0,
+            gender: m.gender === '女' ? '女' : '男',
+            mixedPreference: normPref(m.mixedPreference),
+          };
+        });
+
+        // gp-S9 fix v3 (2026-05-24): メンバー 0 人時の専用表示
+        //   両チームともに 0 人 → 数値を計算しても「合計 0 試合」が並ぶだけでオーナー混乱する
+        //   → 専用メッセージ「メンバーを追加すると予定試合数が表示されます」を出す
+        if (teamA.length === 0 && teamB.length === 0) {
+          elRounds.textContent = String(n);
+          if (elEmpty)   elEmpty.style.display = 'block';
+          if (elNumbers) elNumbers.style.display = 'none';
+          if (typeof console !== 'undefined' && console.info) {
+            console.info('[gp-preview] members=0 → empty メッセージ表示');
+          }
+          return;
+        }
+        // 数値ブロックに戻す（メンバー追加後の再描画用）
+        if (elEmpty)   elEmpty.style.display = 'none';
+        if (elNumbers) elNumbers.style.display = '';
+
+        var ctx = {
+          courts: cfg.courtCount,
+          teamA: teamA,
+          teamB: teamB,
+          categories: cfg.categories,
+          history: [],
+          // 2026-05-26: UI プレビューも penaltyWeights 反映（実生成と完全一致）
+          penaltyWeights: cfg.penaltyWeights || undefined,
+        };
+        // gp-S9 fix v4 (2026-05-24 reviewer 不均衡構成 UI vs 実生成乖離対応):
+        //   実生成 generateOne は N>=2 / mixedCount=null の auto モードで:
+        //     planN = planOptimalConfiguration_(n, ctxN, {})  ← N 全体プランを 1 回計算
+        //   を実行し、decideRoundSlots_ で各 R の slot を確定。
+        //   UIプレビューも同じく planOptimalConfiguration_(n, ctx, {}) を 1 回呼ぶことで
+        //   N 全体最適化と完全に一致する。
+        //
+        //   旧 v2/v3: 1R×N 合計モデル (planOptimalConfiguration_(1) を N 回)
+        //     → 不均衡 (A 男4女3 / B 男4女2 / N=10) で 1R 単位では「男ダブ1+ミックス1」が
+        //       最適と判定され続け、N 全体最適 (男ダブ12/女ダブ6/ミックス2) と乖離。
+        //     例: 1R×10 合計 = (10, 0, 10) vs N全体プラン = (12, 6, 2) 完全に違う
+        //
+        //   分岐モデル:
+        //     - mixedCount HARD（数値）: distribution = planMixDistribution(M, n) で
+        //       各 R の targetMix を均等配分 → 1R 単位 planOptimalConfiguration_(1, {fixedMix})
+        //       を N 回呼んで合計。これは generateOne の「distribution パス」と同じ。
+        //     - mixedCount=null / N>=2: planOptimalConfiguration_(n, ctx, {}) を 1 回呼ぶ。
+        //       これは generateOne の「N 全体 slotPlan パス」と同じ。
+        //     - N=1: planOptimalConfiguration_(1, ctx, {}) を 1 回呼ぶ。
+        // gm-S11 (2026-05-24): mixedCount の優先順位は generateOne と同一
+        //   ① 生成画面 input (#gen-mixed-count) → ② cfg.mixedCount → ③ auto
+        // gm-S12 (2026-05-25): 男ダブ/女ダブも input から読む（generateOne と同じ優先順位）
+        var elGenMixIn = document.getElementById('gen-mixed-count');
+        var rawGenMixIn = elGenMixIn ? elGenMixIn.value : '';
+        var hasInputMix = (rawGenMixIn !== '' && rawGenMixIn != null && !isNaN(Number(rawGenMixIn)));
+        var hasCfgMix = (cfg.mixedCount != null && cfg.mixedCount !== ''
+                          && !isNaN(Number(cfg.mixedCount)));
+        var hasMixedCountValue = hasInputMix || hasCfgMix;
+        var inputMDPrev = resolveGenMDCount();
+        var inputFDPrev = resolveGenFDCount();
+        var hasInputMDPrev = inputMDPrev !== null;
+        var hasInputFDPrev = inputFDPrev !== null;
+        var hasAnyDoublesInputPrev = hasInputMDPrev || hasInputFDPrev;
+        var a = 0, b = 0, c = 0;
+        if (hasMixedCountValue && !hasAnyDoublesInputPrev) {
+          // mixedCount HARD 配分パス (generateOne distribution パスと同一・男女ダブ未指定時のみ)
+          var M = hasInputMix ? Number(rawGenMixIn) : Number(cfg.mixedCount);
+          if (M < 0) M = 0;
+          if (M > 99) M = 99;
+          var maxTotal = await calculateMaxPossibleMix(n);
+          if (M > maxTotal) M = maxTotal;
+          var distribution = planMixDistribution(M, n);
+          for (var i = 0; i < n; i++) {
+            var p1R = window.TennisCore.planOptimalConfiguration_(1, ctx, { fixedMix: distribution[i] });
+            if (p1R) {
+              a += (isFinite(p1R.a) ? p1R.a : 0);
+              b += (isFinite(p1R.b) ? p1R.b : 0);
+              c += (isFinite(p1R.c) ? p1R.c : 0);
+            }
+          }
+        } else {
+          // auto モード（または fixedMD/FD いずれか指定時）: N 全体プランを 1 回呼ぶ
+          // gm-S12: 入力欄から fixedMix/fixedMD/fixedFD を opts に詰めて HARD 制約反映
+          var optsPrev = {};
+          if (hasInputMix) optsPrev.fixedMix = Number(rawGenMixIn);
+          else if (hasCfgMix) optsPrev.fixedMix = Number(cfg.mixedCount);
+          if (hasInputMDPrev) optsPrev.fixedMD = inputMDPrev;
+          if (hasInputFDPrev) optsPrev.fixedFD = inputFDPrev;
+          var planN = window.TennisCore.planOptimalConfiguration_(n, ctx, optsPrev);
+          if (planN) {
+            a = isFinite(planN.a) ? planN.a : 0;
+            b = isFinite(planN.b) ? planN.b : 0;
+            c = isFinite(planN.c) ? planN.c : 0;
+          }
+        }
+        elRounds.textContent = String(n);
+        elMD.textContent  = '男ダブ '   + a + '試合';
+        elFD.textContent  = '女ダブ '   + b + '試合';
+        elMix.textContent = 'ミックス ' + c + '試合';
+        elTotal.textContent = String(a + b + c);
+        // 2026-05-25 「予定試合数 0 バグ」対応:
+        //   fixedMD/fixedFD/fixedMix 合計が totalSlots を超過しても
+        //   planOptimalConfiguration_ 内 fallback で {a,b,c} を必ず返すようにした。
+        //   ここでは合計超過/不足を視認できるよう、合計表示に警告サフィックスを付与する。
+        var totalSlotsPrev = n * (Number(cfg.courtCount) || 2);
+        if ((a + b + c) > totalSlotsPrev) {
+          elTotal.textContent = String(a + b + c) + ' (※全 ' + totalSlotsPrev + ' 試合超過)';
+        } else if ((a + b + c) < totalSlotsPrev) {
+          elTotal.textContent = String(a + b + c) + ' (空き ' + (totalSlotsPrev - (a + b + c)) + ' 試合)';
+        }
+        // gp-S9 fix v3: 実機デバッグ用ログ（devtools console で値が見える）
+        if (typeof console !== 'undefined' && console.info) {
+          console.info('[gp-preview] N=' + n + ' / members A=' + teamA.length + ' B=' + teamB.length
+                       + ' / MD=' + a + ' FD=' + b + ' Mix=' + c + ' / 合計=' + (a + b + c) + ' / totalSlots=' + totalSlotsPrev);
+        }
+      } catch (err) {
+        // 表示専用なので失敗時は "-" で残す（コンソール出力のみ・UI を壊さない）
+        if (typeof console !== 'undefined' && console.warn) {
+          console.warn('updateGeneratePreview failed:', err && err.message);
+        }
+        elRounds.textContent = String(readGenerateCount() || 1);
+        elMD.textContent  = '男ダブ -試合';
+        elFD.textContent  = '女ダブ -試合';
+        elMix.textContent = 'ミックス -試合';
+        elTotal.textContent = '-';
+      }
+    }
+
+    // spec/feature-mixedcount-hard-2026-05-23.md §6-1:
+    //   N ラウンド合計で M 試合を均等配分する計画を生成する。
+    //   入力: M（mixedCount 目標）, N（ラウンド数）
+    //   出力: [m1, m2, ..., mN] / sum(arr) = M / max-min <= 1（均等配分）
+    //   端数: 前方 (M % N) ラウンドに +1 を寄せる（均等な間隔・推奨実装）
+    function planMixDistribution(M, N) {
+      if (!isFinite(M) || M < 0) M = 0;
+      if (!isFinite(N) || N < 1) N = 1;
+      M = Math.floor(M);
+      N = Math.floor(N);
+      var base = Math.floor(M / N);
+      var rem  = M - base * N;
+      var arr  = [];
+      for (var i = 0; i < N; i++) {
+        arr.push(base + (i < rem ? 1 : 0));
+      }
+      return arr;
+    }
+
+    // spec/feature-mixedcount-hard-2026-05-23.md §6-3:
+    //   N ラウンドで物理的に組めるミックス試合数の上限を事前計算する。
+    //   maxMix_eff_per_round = min(mActEff, fActEff, mBctEff, fBctEff, courtCount)
+    //                          ※ 'none' を除いた男女有効プール × 1R 試合枠（コート数）
+    //   maxTotal = maxMix_eff_per_round * N
+    async function calculateMaxPossibleMix(numRounds) {
+      var cfg = await dbGetConfig();
+      var all = await window.store.getAll('members');
+      var teamA = all.filter(function (m) { return m && m.team === 'A' && m.mixedPreference !== 'none'; });
+      var teamB = all.filter(function (m) { return m && m.team === 'B' && m.mixedPreference !== 'none'; });
+      var mA = teamA.filter(function (m) { return m.gender === '男'; }).length;
+      var fA = teamA.filter(function (m) { return m.gender === '女'; }).length;
+      var mB = teamB.filter(function (m) { return m.gender === '男'; }).length;
+      var fB = teamB.filter(function (m) { return m.gender === '女'; }).length;
+      var maxMixPerRound = Math.min(mA, fA, mB, fB);
+      // 1R あたりコート数も上限になる（試合数 = コート数）
+      var courtCount = Number(cfg.courtCount) || 2;
+      maxMixPerRound = Math.min(maxMixPerRound, courtCount);
+      return Math.max(0, maxMixPerRound * Number(numRounds));
+    }
+
+    // gm-S11 (2026-05-24 オーナー仕様変更):
+    //   ミックス試合数の推奨値を、男女数 + 個別希望 (more/less/null/none) から自動算出。
+    //   戻り値: { value, breakdown: { mA, fA, mB, fB, more, less, null, none }, maxMixTotal, totalSlots }
+    //
+    // 2026-05-25 「推奨値合計バグ」対応:
+    //   value を planOptimalConfiguration_ の {a,b,c} の c に統一する。
+    //   これにより MD/FD 推奨値 (plan.a, plan.b) と合計が必ず totalSlots に一致する。
+    //   旧: ratio 0.3 ベースの独立計算で MD/FD 推奨値と合計超過する事象が発生。
+    //   breakdown / maxMixTotal は表示用に維持。
+    async function calculateGenMixRecommend(numRounds) {
+      var cfg = await dbGetConfig();
+      var all = await window.store.getAll('members');
+      var courts = Number(cfg.courtCount) || 2;
+      var n = Math.max(1, Math.floor(Number(numRounds) || 1));
+      var totalSlots = n * courts;
+
+      // 'none' 除外でカウント (maxMix の計算用)
+      var teamAEff = all.filter(function (m) { return m && m.team === 'A' && m.mixedPreference !== 'none'; });
+      var teamBEff = all.filter(function (m) { return m && m.team === 'B' && m.mixedPreference !== 'none'; });
+      var mA = teamAEff.filter(function (m) { return m.gender === '男'; }).length;
+      var fA = teamAEff.filter(function (m) { return m.gender === '女'; }).length;
+      var mB = teamBEff.filter(function (m) { return m.gender === '男'; }).length;
+      var fB = teamBEff.filter(function (m) { return m.gender === '女'; }).length;
+      var maxMixPerRound = Math.min(mA, fA, mB, fB);
+      var maxMixTotal = maxMixPerRound * n;
+
+      // 希望調整: 'none' 除外メンバーから more/less/null をカウント
+      var effMembers = all.filter(function (m) { return m && m.mixedPreference !== 'none'; });
+      var moreCount = effMembers.filter(function (m) { return m.mixedPreference === 'more'; }).length;
+      var lessCount = effMembers.filter(function (m) { return m.mixedPreference === 'less'; }).length;
+      var nullCount = effMembers.filter(function (m) { return !m.mixedPreference; }).length;
+      var noneCount = all.filter(function (m) { return m && m.mixedPreference === 'none'; }).length;
+
+      // 統一推奨値 (planN.c) を採用
+      var rec = await calculateAllGenRecommendations(n);
+      var value = rec.mix;
+      if (value < 0)             value = 0;
+      if (value > maxMixTotal)   value = maxMixTotal;
+
+      return {
+        value: value,
+        breakdown: { mA: mA, fA: fA, mB: mB, fB: fB, more: moreCount, less: lessCount, null: nullCount, none: noneCount },
+        maxMixTotal: maxMixTotal,
+        totalSlots: totalSlots,
+        // 旧フィールド ratio は plan ベース計算に統一したため非該当だが互換のため残す
+        ratio: totalSlots > 0 ? value / totalSlots : 0,
+      };
+    }
+
+    // gm-S11: 生成画面の推奨値ボックス (#gen-mix-recommend) を更新
+    async function updateGenMixRecommend() {
+      var elRec = document.getElementById('gen-mix-recommend');
+      if (!elRec) return; // 生成画面でない / 描画前
+      try {
+        var n = readGenerateCount();
+        if (!(n >= 1)) n = 1;
+        var rec = await calculateGenMixRecommend(n);
+        var bd = rec.breakdown;
+        var lines = [];
+        lines.push('推奨値: <strong>' + rec.value + ' 試合</strong>');
+        lines.push('<span style="font-size:11px;display:block;margin-top:4px;">' +
+          'メンバー: A男' + bd.mA + '/A女' + bd.fA + '/B男' + bd.mB + '/B女' + bd.fB +
+          ' / 希望: 多め' + bd.more + ' / 少なめ' + bd.less + ' / 指定なし' + bd.null + ' / なし' + bd.none +
+        '</span>');
+        lines.push('<span style="font-size:11px;display:block;">物理上限: ' + rec.maxMixTotal + ' 試合 / 全試合数: ' + rec.totalSlots + '</span>');
+        elRec.innerHTML = lines.join('<br>');
+        if (typeof console !== 'undefined' && console.info) {
+          console.info('[gen-mix-recommend] N=' + n + ' value=' + rec.value + ' max=' + rec.maxMixTotal);
+        }
+      } catch (err) {
+        if (typeof console !== 'undefined' && console.warn) {
+          console.warn('updateGenMixRecommend failed:', err && err.message);
+        }
+        elRec.innerHTML = '推奨値: -';
+      }
+    }
+
+    // gm-S11: 「推奨値を入力欄に反映」ボタンのハンドラ
+    // 2026-05-25 「推奨値合計バグ」対応:
+    //   plan.c (= calculateAllGenRecommendations.mix) を直接反映する。
+    //   旧 ratio 0.3 ベース (calculateGenMixRecommend.value) は plan.c と一致しない
+    //   ケースがあり、MD/FD と合計が totalSlots を超過していた。
+    async function applyMixRecommend() {
+      var elInput = document.getElementById('gen-mixed-count');
+      if (!elInput) return;
+      try {
+        var n = readGenerateCount();
+        if (!(n >= 1)) n = 1;
+        var rec = await calculateAllGenRecommendations(n);
+        elInput.value = String(rec.mix);
+        // input 変更イベントを手動発火して updateGeneratePreview を呼ぶ
+        updateGeneratePreview();
+      } catch (err) {
+        alert('推奨値の取得に失敗しました: ' + ((err && err.message) || String(err)));
+      }
+    }
+
+    // gm-S12 (2026-05-25 オーナー追加仕様): 男ダブ・女ダブ推奨値計算 + 入力欄反映
+    // 2026-05-25 「推奨値合計バグ」対応:
+    //   旧: MD/FD は planN.{a,b} / Mix は ratio 0.3 ベース (calculateGenMixRecommend) と
+    //       バラバラのロジックで算出していた → 合計が totalSlots を超過 (例: 4+4+3=11 > 10)
+    //   新: 3つすべて planOptimalConfiguration_(N, ctx, {}) の {a, b, c} から取得し
+    //       「合計 == totalSlots」を物理的に保証する。
+    //
+    //   calculateAllGenRecommendations(numRounds):
+    //     - planN を 1 回だけ計算
+    //     - 戻り値: { md, fd, mix, totalSlots, sumOk, plan, ctxEmpty }
+    //     - 各 update 関数 / apply 関数はこれを呼ぶだけにする
+    async function calculateAllGenRecommendations(numRounds) {
+      var cfg = await dbGetConfig();
+      var all = await window.store.getAll('members');
+      var courts = Number(cfg.courtCount) || 2;
+      var n = Math.max(1, Math.floor(Number(numRounds) || 1));
+      var totalSlots = n * courts;
+      var normPref = function (mp) {
+        return (mp === 'more' || mp === 'less' || mp === 'none') ? mp : null;
+      };
+      var teamA = all.filter(function (m) { return m && m.team === 'A'; }).map(function (m) {
+        return {
+          name: m.name,
+          level: m.level || 0,
+          gender: m.gender === '女' ? '女' : '男',
+          mixedPreference: normPref(m.mixedPreference),
+        };
+      });
+      var teamB = all.filter(function (m) { return m && m.team === 'B'; }).map(function (m) {
+        return {
+          name: m.name,
+          level: m.level || 0,
+          gender: m.gender === '女' ? '女' : '男',
+          mixedPreference: normPref(m.mixedPreference),
+        };
+      });
+      if (teamA.length === 0 && teamB.length === 0) {
+        return {
+          md: 0, fd: 0, mix: 0,
+          totalSlots: totalSlots,
+          sumOk: true, // 0+0+0 vs totalSlots=0 のみ true / それ以外は false 扱いで OK
+          ctxEmpty: true,
+          plan: null,
+        };
+      }
+      var ctx = {
+        courts: courts,
+        teamA: teamA,
+        teamB: teamB,
+        categories: cfg.categories,
+        history: [],
+        // 2026-05-26: 推奨値計算も penaltyWeights 反映
+        penaltyWeights: cfg.penaltyWeights || undefined,
+      };
+      var planN = window.TennisCore.planOptimalConfiguration_(n, ctx, {});
+      if (!planN) {
+        return {
+          md: 0, fd: 0, mix: 0,
+          totalSlots: totalSlots,
+          sumOk: false,
+          ctxEmpty: false,
+          plan: null,
+        };
+      }
+      var md  = isFinite(planN.a) ? planN.a : 0;
+      var fd  = isFinite(planN.b) ? planN.b : 0;
+      var mix = isFinite(planN.c) ? planN.c : 0;
+      return {
+        md: md, fd: fd, mix: mix,
+        totalSlots: totalSlots,
+        sumOk: (md + fd + mix) === totalSlots,
+        ctxEmpty: false,
+        plan: planN,
+      };
+    }
+
+    // 旧 calculateGenDoublesRecommend 互換ラッパ（既存テスト・呼出経路を壊さない）
+    async function calculateGenDoublesRecommend(numRounds) {
+      var rec = await calculateAllGenRecommendations(numRounds);
+      return { mdValue: rec.md, fdValue: rec.fd, mixValue: rec.mix };
+    }
+
+    // gm-S12: 男ダブ推奨値ボックス (#gen-md-recommend) を更新
+    async function updateGenMDRecommend() {
+      var elRec = document.getElementById('gen-md-recommend');
+      if (!elRec) return;
+      try {
+        var n = readGenerateCount();
+        if (!(n >= 1)) n = 1;
+        var rec = await calculateAllGenRecommendations(n);
+        var sum = rec.md + rec.fd + rec.mix;
+        elRec.innerHTML = '推奨値: <strong>' + rec.md + ' 試合</strong>' +
+          '<span style="font-size:11px;display:block;margin-top:4px;">' +
+          '※ plan {a:' + rec.md + ', b:' + rec.fd + ', c:' + rec.mix + '} から算出 (合計' + sum + '/' + rec.totalSlots + ')</span>';
+      } catch (err) {
+        if (typeof console !== 'undefined' && console.warn) {
+          console.warn('updateGenMDRecommend failed:', err && err.message);
+        }
+        elRec.innerHTML = '推奨値: -';
+      }
+    }
+
+    // gm-S12: 女ダブ推奨値ボックス (#gen-fd-recommend) を更新
+    async function updateGenFDRecommend() {
+      var elRec = document.getElementById('gen-fd-recommend');
+      if (!elRec) return;
+      try {
+        var n = readGenerateCount();
+        if (!(n >= 1)) n = 1;
+        var rec = await calculateAllGenRecommendations(n);
+        var sum = rec.md + rec.fd + rec.mix;
+        elRec.innerHTML = '推奨値: <strong>' + rec.fd + ' 試合</strong>' +
+          '<span style="font-size:11px;display:block;margin-top:4px;">' +
+          '※ plan {a:' + rec.md + ', b:' + rec.fd + ', c:' + rec.mix + '} から算出 (合計' + sum + '/' + rec.totalSlots + ')</span>';
+      } catch (err) {
+        if (typeof console !== 'undefined' && console.warn) {
+          console.warn('updateGenFDRecommend failed:', err && err.message);
+        }
+        elRec.innerHTML = '推奨値: -';
+      }
+    }
+
+    // 2026-05-25 「推奨値合計バグ」対応:
+    //   3つの推奨値ボックスを 1 回の plan 計算で同時に更新する親関数。
+    //   plan.a + plan.b + plan.c = totalSlots を必ず保証するため、3つの update を
+    //   個別に呼ぶ既存パスを残しつつ、本関数を loadGenerate / oninput で呼ぶ。
+    async function updateAllGenRecommendations() {
+      await Promise.all([
+        updateGenMDRecommend(),
+        updateGenFDRecommend(),
+        updateGenMixRecommend(),
+      ]);
+    }
+
+    // gm-S12: 男ダブ推奨値を input に反映
+    async function applyMDRecommend() {
+      var elInput = document.getElementById('gen-md-count');
+      if (!elInput) return;
+      try {
+        var n = readGenerateCount();
+        if (!(n >= 1)) n = 1;
+        var rec = await calculateAllGenRecommendations(n);
+        elInput.value = String(rec.md);
+        updateGeneratePreview();
+      } catch (err) {
+        alert('男ダブ推奨値の取得に失敗しました: ' + ((err && err.message) || String(err)));
+      }
+    }
+
+    // gm-S12: 女ダブ推奨値を input に反映
+    async function applyFDRecommend() {
+      var elInput = document.getElementById('gen-fd-count');
+      if (!elInput) return;
+      try {
+        var n = readGenerateCount();
+        if (!(n >= 1)) n = 1;
+        var rec = await calculateAllGenRecommendations(n);
+        elInput.value = String(rec.fd);
+        updateGeneratePreview();
+      } catch (err) {
+        alert('女ダブ推奨値の取得に失敗しました: ' + ((err && err.message) || String(err)));
+      }
+    }
+
+    // gm-S12: 男ダブ/女ダブ input の値を取得（空欄なら null = 未指定）
+    //   - 空欄: null (推奨値・auto)
+    //   - 数値: 0..99 にクランプ
+    function resolveGenMDCount() {
+      var el = document.getElementById('gen-md-count');
+      var raw = el ? el.value : '';
+      if (raw === '' || raw == null) return null;
+      var v = Number(raw);
+      if (!isFinite(v) || v < 0) return 0;
+      if (v > 99) return 99;
+      return Math.floor(v);
+    }
+    function resolveGenFDCount() {
+      var el = document.getElementById('gen-fd-count');
+      var raw = el ? el.value : '';
+      if (raw === '' || raw == null) return null;
+      var v = Number(raw);
+      if (!isFinite(v) || v < 0) return 0;
+      if (v > 99) return 99;
+      return Math.floor(v);
+    }
+
+    // gm-S11: 生成画面 input から「この回のミックス試合数」を取得
+    //   空欄なら推奨値を返す。数値が入っていればそれを 0..99 にクランプ。
+    //   返り値: { value: number, fromInput: boolean }
+    async function resolveGenMixCount(numRounds) {
+      var el = document.getElementById('gen-mixed-count');
+      var raw = el ? el.value : '';
+      if (raw === '' || raw == null) {
+        var rec = await calculateGenMixRecommend(numRounds);
+        return { value: rec.value, fromInput: false };
+      }
+      var v = Number(raw);
+      if (!isFinite(v) || v < 0) v = 0;
+      if (v > 99) v = 99;
+      return { value: Math.floor(v), fromInput: true };
+    }
+
+    // S8 + spec/feature-mixedcount-hard-2026-05-23.md:
+    //   N ラウンド連続生成 + mixedCount HARD 配分計画
+    //   ① 物理上限を事前計算し M > maxTotal なら confirm（OK=縮小実行 / Cancel=中止）
+    //   ② planMixDistribution(M, N) で各ラウンドの targetMix を均等配分
+    //   ③ ループ内で dbGenerateRound(targetMix) を呼ぶ
+    async function generateOne() {
+      var n = readGenerateCount();
+      if (n === 0) { alert('ラウンド数は 1 以上を指定してください'); return; }
+      if (n === -1) { alert('一度に生成できるのは 50 ラウンドまでです'); return; }
+      if (!confirm('自動で次の ' + n + ' ラウンドを生成しますか？')) return;
+
+      // gm-S11 (2026-05-24 オーナー仕様変更): mixedCount の優先順位
+      //   ① 生成画面 input (#gen-mixed-count) が数値 → 最優先（オーナー仕様: 都度入力）
+      //   ② cfg.mixedCount が数値 → 後方互換 (既存テスト経路)
+      //   ③ ①②とも未指定 → auto（slotPlan パスへ）
+      // ※ 生成画面 input 空欄でも resolveGenMixCount は推奨値を返すため
+      //    「実質 ① を常に有効」にすると後方互換 ② が永続的に死ぬ。
+      //    既存テストとの整合のため、明示的に input が空欄なら ② を試み、
+      //    それも null なら推奨値を採用しない（auto=null distribution）形にする。
+      //
+      // gm-S12 (2026-05-25 オーナー追加仕様):
+      //   男ダブ・女ダブも生成時に試合数指定可能（fixedMD/fixedFD opts）。
+      //   #gen-md-count / #gen-fd-count が数値なら HARD 制約として絶対化、
+      //   空欄なら従来通り auto（planOptimalConfiguration_ で自動算出）。
+      //   3つの input が同時に空欄 or 数値混在の場合も対応：
+      //     - 生成画面の N 全体プランを planOptimalConfiguration_(n, ctx, {fixedMix, fixedMD, fixedFD}) で算出
+      //     - 各 input 空欄なら fixedXX=null として core に渡す（=auto）
+      //     - 数値なら fixedXX=数値 として HARD 制約に
+      //   distribution パス（mixedCount HARD のみ）は後方互換テスト用に残す。
+      var cfg = await dbGetConfig();
+      var elGenMix = document.getElementById('gen-mixed-count');
+      var rawGenMix = elGenMix ? elGenMix.value : '';
+      var hasInputMix = (rawGenMix !== '' && rawGenMix != null && !isNaN(Number(rawGenMix)));
+      var hasCfgMix = (cfg.mixedCount != null && cfg.mixedCount !== ''
+                        && !isNaN(Number(cfg.mixedCount)));
+      var hasMixedCount = hasInputMix || hasCfgMix;
+
+      // gm-S12: 男ダブ・女ダブ input の値（null = 未指定 / 数値 = HARD）
+      var inputMD = resolveGenMDCount();
+      var inputFD = resolveGenFDCount();
+      var hasInputMD = inputMD !== null;
+      var hasInputFD = inputFD !== null;
+      var hasAnyDoublesInput = hasInputMD || hasInputFD;
+
+      var distribution = null; // null = 配分計画なし（既存 auto パスに委ねる）
+      // gm-S12: 男ダブ・女ダブ入力がない時に限り、旧 distribution パスを使う
+      //   （ミックスのみ指定の場合は後方互換テスト経路を維持）
+      if (hasMixedCount && !hasAnyDoublesInput) {
+        var M;
+        if (hasInputMix) {
+          M = Number(rawGenMix);
+          if (M < 0) M = 0;
+          if (M > 99) M = 99;
+        } else {
+          M = Number(cfg.mixedCount);
+        }
+        var maxTotal = await calculateMaxPossibleMix(n);
+        if (M > maxTotal) {
+          // 物理上限超過: confirm で縮小実行 / 中止
+          var ok = confirm(
+            '物理的にミックス試合を ' + M + ' 回組めません。最大 ' + maxTotal + ' 回まで組めます。\n' +
+            'OK = ' + maxTotal + ' 回で生成 / キャンセル = 中止'
+          );
+          if (!ok) return;
+          M = maxTotal;
+        }
+        distribution = planMixDistribution(M, n);
+      }
+
+      // 2026-05-24: カテゴリ最低1試合 hard 保証対応
+      //   mixedCount=null（auto）かつ N >= 2 のとき、N ラウンド全体プラン
+      //   (planOptimalConfiguration_) を 1 回算出し、decideRoundSlots_ で
+      //   各 R の slot 全体（MD/FD/Mix）を算出して dbGenerateRound に渡す。
+      //   これにより 1R 単位の plan で「ミックスのみ全枠」になっていた問題を解消。
+      //
+      // gm-S12: 男ダブ・女ダブ入力がある場合（hasAnyDoublesInput）も slotPlan パスを使い
+      //   planOptimalConfiguration_(n, ctxN, {fixedMix, fixedMD, fixedFD}) で N 全体プランを算出する。
+      //   3つの fixedXX のいずれかが数値なら HARD 制約、null なら auto。
+      var slotPlan = null; // [{ MD, FD, Mix }] 各 R の slot
+      var shouldUseSlotPlan = (!hasMixedCount || hasAnyDoublesInput) && n >= 1;
+      if (shouldUseSlotPlan) {
+        try {
+          var allMembers = await window.store.getAll('members');
+          var teamAAll = allMembers.filter(function (m) { return m && m.team === 'A'; });
+          var teamBAll = allMembers.filter(function (m) { return m && m.team === 'B'; });
+          var ctxN = {
+            courts: cfg.courtCount || 1,
+            teamAName: cfg.teamAName || 'チームA',
+            teamBName: cfg.teamBName || 'チームB',
+            teamA: teamAAll,
+            teamB: teamBAll,
+            categories: cfg.categories || {
+              mensDoubles: true, womensDoubles: true, mixedDoubles: true,
+              mensSingles: false, womensSingles: false,
+            },
+            history: [],
+            // 2026-05-26: アルゴリズム調整 UI 対応・N 全体プランも penaltyWeights を反映
+            penaltyWeights: cfg.penaltyWeights || undefined,
+          };
+          // gm-S12: fixedMix/fixedMD/fixedFD を opts に詰める
+          //   - 入力欄が空欄なら null（auto）
+          //   - 数値なら HARD 制約
+          var planOpts = {};
+          if (hasInputMix) planOpts.fixedMix = Number(rawGenMix);
+          else if (hasCfgMix) planOpts.fixedMix = Number(cfg.mixedCount);
+          if (hasInputMD) planOpts.fixedMD = inputMD;
+          if (hasInputFD) planOpts.fixedFD = inputFD;
+          var planN = window.TennisCore.planOptimalConfiguration_(n, ctxN, planOpts);
+          if (planN) {
+            slotPlan = [];
+            var cumA = { MD: 0, FD: 0, Mix: 0 };
+            for (var rr = 1; rr <= n; rr++) {
+              var slotR = window.TennisCore.decideRoundSlots_(
+                planN, cumA, rr, n, ctxN.courts, ctxN
+              );
+              slotPlan.push(slotR);
+              cumA.MD += slotR.MD;
+              cumA.FD += slotR.FD;
+              cumA.Mix += slotR.Mix;
+            }
+          }
+        } catch (e) {
+          slotPlan = null;
+        }
+      }
+
+      var buttons = document.querySelectorAll('.generate-btn');
+      buttons.forEach(function (b) { b.disabled = true; });
+      var success = 0;
+      var firstRound = null;
+      var lastRound = null;
+      var lastRoundWithMatches = null; // 2026-05-25 gm-S12: matchCount>0 の最終ラウンド (navigate 先)
+      var totalMatches = 0;
+      for (var i = 0; i < n; i++) {
+        try {
+          // 配分計画があれば各ラウンドの targetMix を渡す。なければ undefined（既存パス）。
+          //   優先順位:
+          //     1) distribution (mixedCount HARD 配分・数値の Mix 試合数)
+          //     2) slotPlan (N全体 plan 配分・{ MD, FD, Mix } オブジェクト)
+          //     3) undefined (従来の auto パス)
+          var tm;
+          if (distribution != null) {
+            tm = distribution[i];
+          } else if (slotPlan != null && slotPlan[i]) {
+            tm = slotPlan[i];
+          } else {
+            tm = undefined;
+          }
+          var res = await dbGenerateRound(tm);
+          success++;
+          if (firstRound == null) firstRound = res.round;
+          lastRound = res.round;
+          // 2026-05-25 改訂: matchCount > 0 のラウンドだけを「最後の試合ありラウンド」として記録
+          //   bucket gap=1.0 hard 除外で plan の合計試合数 < totalSlots になる構成では
+          //   後段の R で matches=[] (空 record) になり得る。一覧表示は問題ないが、
+          //   ラウンド詳細画面 (.match-card セレクタが出る画面) へ遷移するには
+          //   matches > 0 のラウンド指定が必要。
+          if ((res.matchCount || 0) > 0) lastRoundWithMatches = res.round;
+          totalMatches += res.matchCount || 0;
+        } catch (err) {
+          buttons.forEach(function (b) { b.disabled = false; });
+          var msg = (err && err.message) || String(err);
+          alert(n + '回中 ' + success + ' ラウンド成功、' + (i + 1) + ' 回目で失敗: ' + msg);
+          // (M-1) ラウンドは DB に残したまま一覧へ遷移
+          navigateTo('#view=rounds');
+          return;
+        }
+      }
+      buttons.forEach(function (b) { b.disabled = false; });
+      if (success === 1) {
+        alert('第' + lastRound + 'ラウンドを生成しました（' + totalMatches + '試合）');
+      } else {
+        alert(success + ' ラウンドを生成しました（第' + firstRound + '〜第' + lastRound + 'ラウンド・合計' + totalMatches + '試合）');
+      }
+      // 全成功時は最後の「試合あり」ラウンド詳細へ遷移
+      //   matchCount > 0 のラウンドが 1 つもなければ一覧へフォールバック
+      var navigateRound = lastRoundWithMatches != null ? lastRoundWithMatches : null;
+      if (navigateRound != null) {
+        navigateTo('#view=round&round=' + navigateRound);
+      } else {
+        navigateTo('#view=rounds');
+      }
+    }
+
+    // S8: 空テンプレ N ラウンド連続作成
+    async function generateCustom() {
+      var n = readGenerateCount();
+      if (n === 0) { alert('ラウンド数は 1 以上を指定してください'); return; }
+      if (n === -1) { alert('一度に生成できるのは 50 ラウンドまでです'); return; }
+      if (!confirm('空テンプレで ' + n + ' ラウンド作成しますか？\n\n手動で選手名を入力する用です。')) return;
+      var buttons = document.querySelectorAll('.generate-btn');
+      buttons.forEach(function (b) { b.disabled = true; });
+      var success = 0;
+      var firstRound = null;
+      var lastRound = null;
+      for (var i = 0; i < n; i++) {
+        try {
+          var res = await dbGenerateRoundCustom();
+          success++;
+          if (firstRound == null) firstRound = res.round;
+          lastRound = res.round;
+        } catch (err) {
+          buttons.forEach(function (b) { b.disabled = false; });
+          var msg = (err && err.message) || String(err);
+          alert(n + '回中 ' + success + ' ラウンド成功、' + (i + 1) + ' 回目で失敗: ' + msg);
+          navigateTo('#view=rounds');
+          return;
+        }
+      }
+      buttons.forEach(function (b) { b.disabled = false; });
+      if (success === 1) {
+        alert('第' + lastRound + 'ラウンド（空テンプレ）を作成しました');
+      } else {
+        alert(success + ' ラウンドの空テンプレを作成しました（第' + firstRound + '〜第' + lastRound + 'ラウンド）');
+      }
+      navigateTo('#view=round&round=' + lastRound);
+    }
+
+    // ─── タブバーのアクティブ状態 ───────────────────────────
+    function setActiveTab() {
+      var bar = document.getElementById('footer-tab-bar');
+      if (!bar) return;
+      var tabKey = (VIEW === 'round' || VIEW === 'home') ? 'rounds' : VIEW;
+      var items = bar.querySelectorAll('.tab-item');
+      for (var i = 0; i < items.length; i++) {
+        var item = items[i];
+        var isActive = item.getAttribute('data-tab') === tabKey;
+        item.classList.toggle('active', isActive);
+        if (isActive) item.setAttribute('aria-current', 'page');
+        else item.removeAttribute('aria-current');
+      }
+    }
+
+    // ============================================================
+    // 初期化: store.open() → 初回 refresh
+    // ============================================================
+    (async function init() {
+      try {
+        await window.store.open();
+        refresh();
+      } catch (err) {
+        showError('IndexedDB の初期化に失敗しました: ' + ((err && err.message) || String(err)));
+      }
+    })();
+
+    // ============================================================
+    // ADR-001 Phase 3 (PWA化) 2026-05-26: Service Worker 登録
+    // ------------------------------------------------------------
+    // 仕様:
+    //   - http(s):// 配信時のみ動作（仕様上 file:// では Service Worker は動かない）
+    //   - file:// で起動された場合は console.warn だけ吐いて続行（既存ダブルクリック起動を壊さない）
+    //   - 登録失敗（HTTPS 未配信・SW JS 取得失敗 等）も console.warn のみ・本処理は止めない
+    //   - スコープは './'（このフォルダ配下を全てキャッシュ対象）
+    // ============================================================
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function () {
+        // file:// では SW 登録自体がエラーになる仕様。事前検出して console.warn 化。
+        if (window.location.protocol === 'file:') {
+          console.warn('[PWA] Service Worker は file:// では動作しません（http(s):// 配信時のみ）');
+          return;
+        }
+        navigator.serviceWorker.register('./sw.js').then(function (reg) {
+          // 登録成功時は scope だけ吐く（更新検知は Phase 4 以降で実装）
+          console.log('[PWA] Service Worker registered:', reg.scope);
+        }).catch(function (err) {
+          console.warn('[PWA] Service Worker registration failed:', err && err.message ? err.message : err);
+        });
+      });
+    }
+  </script>
+</body>
+</html>
