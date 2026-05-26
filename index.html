@@ -1960,11 +1960,48 @@
     //   性別が未選択 (gender === '') のメンバーがいたら保存前にアラートで対象名を列挙し、
     //   オーナー判断で「強制保存」か「中止」を選べるようにする。
     //   既存データ ('男' / '女') への影響なし。
+    //
+    // 2026-05-26 オーナー要求 (duplicate-name-block 案A):
+    //   内部の試合管理は name 文字列をキーに使うため、同名2人がいると
+    //   「片方の試合カウントしか進まない / 性別が混線する」などの致命バグが起きる。
+    //   そのため保存前に両チーム横断で name の重複を検知し、重複があれば
+    //   alert で対象名を列挙 → 保存を中止する。
+    //   既存データ (旧データで同名が既に存在) は読み込みのみ動き続け、
+    //   新規保存 (saveMembers) を通そうとした時にのみ拒否される。
     async function saveMembers() {
       collectCurrentMembers();
       var btn = document.getElementById('btn-save-members');
       var teamACopy = JSON.parse(JSON.stringify(currentMembersData.teamA));
       var teamBCopy = JSON.parse(JSON.stringify(currentMembersData.teamB));
+
+      // ─── 同名メンバー検知（保存前・両チーム横断）──────────────────
+      //   仕様: 大文字小文字は区別する（テニスメンバー名は日本語想定なので影響軽微）
+      //         前後空白だけは除去（"田中 " と "田中" は同一扱い）
+      //         空欄行は collectCurrentMembers でスキップ済みだが、念のため再チェック
+      var nameSeen = {};
+      var dupNames = [];
+      function checkDup(m) {
+        if (!m || !m.name) return;
+        var key = String(m.name).trim();
+        if (key === '') return;
+        if (nameSeen[key]) {
+          // 重複回数を稼がずに 1回だけ収集
+          if (dupNames.indexOf(key) === -1) dupNames.push(key);
+        } else {
+          nameSeen[key] = true;
+        }
+      }
+      teamACopy.forEach(checkDup);
+      teamBCopy.forEach(checkDup);
+
+      if (dupNames.length > 0) {
+        alert(
+          '同じ名前のメンバーがいます: ' + dupNames.join(', ') + '\n\n' +
+          '内部の試合管理が混乱するため、識別できる名前にしてください。\n' +
+          '例: 「田中A」「田中B」「田中 太郎」「田中 (チームA)」など'
+        );
+        return; // 保存中止
+      }
 
       // ─── 性別未選択チェック（保存前）────────────────────────
       //   teamA/teamB 横断で gender が '男' / '女' 以外（'' / null / undefined）のメンバー名を集める
