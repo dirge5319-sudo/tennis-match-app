@@ -519,6 +519,119 @@
       #gp-md, #gp-fd, #gp-mix, #gp-total,
       #gp-md-m, #gp-fd-m, #gp-mix-m, #gp-total-m { transition: none; }
     }
+
+    /* ─── 機能B (2026-05-26): ラウンド生成後のメンバー差し替えモーダル ───
+       仕様:
+       - ラウンド一覧 (.rc-pair) とラウンド詳細 (.players .player) のメンバー名をクリック可能化
+       - クリックでモーダルを開き、候補リストから差し替え先を選択
+       - 候補は チーム・性別・既出メンバー除外でフィルタ済
+       設計:
+       - .swap-name は a/button 風のフォーカス可能 span（アクセシビリティ確保: tabindex=0, role=button）
+       - モーダルは非表示で常駐させ、表示時に .modal-overlay.open を付与
+       - bottom sheet 風: スマホ幅では下から、PC幅では中央寄せ
+       - タップ領域は min-height: 44px（iOS HIG 準拠） */
+    .swap-name {
+      cursor: pointer;
+      text-decoration: underline dotted;
+      text-underline-offset: 2px;
+      -webkit-user-select: none; user-select: none;
+      padding: 2px 4px;
+      border-radius: 4px;
+      transition: background 0.15s;
+    }
+    .swap-name:hover, .swap-name:active { background: rgba(0,122,255,0.12); }
+    .swap-name:focus-visible { outline: 2px solid #0066cc; outline-offset: 2px; }
+    /* ラウンド一覧 (.rc-pair) 内の個別名前は span でラップする都合上、
+       元のテキスト省略 (overflow:hidden) を壊さないよう display:inline-block 化 */
+    .rc-pair .swap-name { display: inline; padding: 1px 2px; font-size: 13px; }
+
+    /* モーダル本体 */
+    .modal-overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.45);
+      display: none;
+      align-items: flex-end;
+      justify-content: center;
+      z-index: 1000;
+      padding: 0;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal-content {
+      background: #fff;
+      width: 100%;
+      max-width: 480px;
+      max-height: 80vh;
+      border-radius: 16px 16px 0 0;
+      padding: 16px;
+      display: flex; flex-direction: column;
+      box-shadow: 0 -4px 16px rgba(0,0,0,0.2);
+    }
+    @media (min-width: 600px) {
+      /* PC幅では中央寄せ・角丸全周 */
+      .modal-overlay { align-items: center; padding: 16px; }
+      .modal-content { border-radius: 16px; max-height: 70vh; }
+    }
+    .modal-content h3 {
+      font-size: 16px; font-weight: 600;
+      margin-bottom: 12px;
+      color: #1d1d1f;
+      line-height: 1.4;
+    }
+    .member-candidate-list {
+      list-style: none;
+      overflow-y: auto;
+      flex: 1 1 auto;
+      margin: 0 0 12px;
+      padding: 0;
+      border: 1px solid #e0e0e0;
+      border-radius: 8px;
+    }
+    .member-candidate-list li {
+      padding: 12px 14px;
+      min-height: 44px;
+      border-bottom: 1px solid #f0f0f3;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      -webkit-user-select: none; user-select: none;
+    }
+    .member-candidate-list li:last-child { border-bottom: none; }
+    .member-candidate-list li:active { background: #f0f0f3; }
+    .member-candidate-list li[role='button']:focus-visible { outline: 2px solid #0066cc; outline-offset: -2px; }
+    .candidate-name { font-weight: 600; }
+    .candidate-meta { color: #6e6e73; font-size: 12px; }
+    .candidate-empty {
+      padding: 16px; text-align: center; color: #6e6e73; font-size: 13px;
+    }
+    .modal-actions { display: flex; gap: 8px; }
+    .modal-btn {
+      flex: 1;
+      padding: 12px;
+      border: 1px solid #d2d2d7;
+      background: #fff;
+      color: #1d1d1f;
+      border-radius: 10px;
+      font-size: 14px; font-weight: 600;
+      min-height: 44px;
+      cursor: pointer;
+    }
+    .modal-btn:active { background: #f0f0f3; }
+    /* ダークモード */
+    @media (prefers-color-scheme: dark) {
+      .swap-name:hover, .swap-name:active { background: rgba(10,132,255,0.20); }
+      .modal-content { background: #2c2c2e; }
+      .modal-content h3 { color: #f5f5f7; }
+      .member-candidate-list { border-color: #38383a; }
+      .member-candidate-list li { border-bottom-color: #38383a; color: #f5f5f7; }
+      .member-candidate-list li:active { background: #1c1c1e; }
+      .candidate-meta { color: #a0a0a8; }
+      .candidate-empty { color: #a0a0a8; }
+      .modal-btn { background: #2c2c2e; color: #f5f5f7; border-color: #48484a; }
+      .modal-btn:active { background: #1c1c1e; }
+    }
   </style>
 </head>
 <body>
@@ -555,6 +668,20 @@
       <span class="tab-icon">⚙</span><span class="tab-label">設定</span>
     </button>
   </nav>
+
+  <!-- 機能B (2026-05-26): メンバー差し替えモーダル
+       - ラウンド一覧/詳細でメンバー名をクリックしたときに openMemberSwapModal で開く
+       - 候補を絞り込み、選択で matches[idx][slot] を更新して再描画
+       - 非表示で常駐させ表示/非表示は .open クラスで切替 -->
+  <div class="modal-overlay" id="member-swap-modal" role="dialog" aria-modal="true" aria-labelledby="swap-modal-title" aria-hidden="true">
+    <div class="modal-content">
+      <h3 id="swap-modal-title">メンバー差し替え</h3>
+      <ul class="member-candidate-list" id="swap-candidate-list" role="listbox"></ul>
+      <div class="modal-actions">
+        <button type="button" class="modal-btn" id="swap-cancel-btn" onclick="closeMemberSwapModal()">キャンセル</button>
+      </div>
+    </div>
+  </div>
 
   <!-- ADR-001 依存スクリプト（順序固定）
        1. tennis-core.js  : 純計算（GAS無依存）
@@ -1353,9 +1480,33 @@
         var matchesHtml = '';
         if (matches.length > 0) {
           var rowsHtml = matches.map(function (m) {
+            // 機能B (2026-05-26): 個別メンバー名を .swap-name でラップしてクリック可能化
+            //   - data-round/data-idx/data-slot/data-name を埋め、openMemberSwapModalFromEl が読み取る
+            //   - escapeHtml(m.a1 || '') → swapWrap(round, idx, slot, name) に置換
+            //   - イベントは round-card の onclick="goToRound(...)" を持つ親に伝播しないよう
+            //     event.stopPropagation() を onclick 属性に直書きする
+            var roundNum = r.round;
+            var matchIdx = m.idx;
+            var swapWrap = function (slot, name) {
+              if (!name) return '';
+              // round-card 親の onclick (goToRound) と Enter キー (handleRoundCardKey) に伝播させない
+              return '<span class="swap-name" role="button" tabindex="0"' +
+                ' data-round="' + escapeHtml(String(roundNum)) + '"' +
+                ' data-idx="' + escapeHtml(String(matchIdx)) + '"' +
+                ' data-slot="' + escapeHtml(slot) + '"' +
+                ' data-name="' + escapeHtml(name) + '"' +
+                ' onclick="event.stopPropagation(); openMemberSwapModalFromEl(this);"' +
+                ' onkeydown="handleSwapNameKey(event, this);">' +
+                escapeHtml(name) +
+                '</span>';
+            };
             // ペア表示（2人なら「・」連結、1人なら単独表示）
-            var pairA = m.a2 ? (escapeHtml(m.a1) + '・' + escapeHtml(m.a2)) : escapeHtml(m.a1 || '');
-            var pairB = m.b2 ? (escapeHtml(m.b1) + '・' + escapeHtml(m.b2)) : escapeHtml(m.b1 || '');
+            var pairA = m.a2
+              ? (swapWrap('a1', m.a1) + '・' + swapWrap('a2', m.a2))
+              : swapWrap('a1', m.a1);
+            var pairB = m.b2
+              ? (swapWrap('b1', m.b1) + '・' + swapWrap('b2', m.b2))
+              : swapWrap('b1', m.b1);
             // スコア・勝者表示（§4-4 ルール）
             var scoreHtml = '';
             var winnerHtml = '';
@@ -1449,6 +1600,226 @@
       }
     }
 
+    // ─── 機能B (2026-05-26): メンバー差し替えモーダル ─────────
+    // オーナー要求: 「試合の組み合わせ決定してからもメンバーを修正したい。
+    //   名前をクリックしたらメンバー変更できて一覧から選べる。
+    //   その人が試合したことにしてほしい」
+    //
+    // 仕様:
+    //   - ラウンド一覧 (renderRounds) と詳細 (renderRound) の名前をクリックで差し替え
+    //   - 候補は チーム (A/B)・性別 (試合タイプから導出) でフィルタ
+    //   - 同ラウンド内で既に出場しているメンバーは候補から除外（重複出場防止）
+    //   - 差し替え後 matches[idx][slot] を更新 → IndexedDB rounds に保存 → 再描画
+    //   - 既存スコア (scoreA/scoreB/winner) は保持
+    //
+    // tennis-core.js のミックス仕様確認済 (2026-05-26):
+    //   - 男子ダブルス  : a1/a2/b1/b2 全員男
+    //   - 女子ダブルス  : 全員女
+    //   - ミックスダブルス: a1=男, a2=女, b1=男, b2=女 (winMA→a1, winFA→a2, winMB→b1, winFB→b2)
+    //   - シングルス（男）: a1=男, b1=男（a2/b2 なし）
+    //   - シングルス（女）: a1=女, b1=女
+    //
+    // 開いている状態は内部 state で保持し、確認は不要 (タップで即適用)。
+    var _swapModalState = null;  // { round, idx, slot, oldName }
+
+    // ラウンド一覧/詳細から呼ばれるエントリポイント
+    //   el は data-round / data-idx / data-slot / data-name を持つ .swap-name 要素
+    async function openMemberSwapModalFromEl(el) {
+      try {
+        if (!el) return;
+        var round = Number(el.getAttribute('data-round'));
+        var idx = Number(el.getAttribute('data-idx'));
+        var slot = String(el.getAttribute('data-slot') || '');
+        var name = String(el.getAttribute('data-name') || '');
+        if (!round || isNaN(idx) || !slot) return;
+        await openMemberSwapModal(round, idx, slot, name);
+      } catch (err) {
+        if (typeof console !== 'undefined' && console.error) {
+          console.error('openMemberSwapModalFromEl failed:', err);
+        }
+      }
+    }
+
+    // Enter/Space で開けるキーボードハンドラ
+    function handleSwapNameKey(e, el) {
+      if (!e) return;
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+        e.preventDefault();
+        // ラウンド一覧でも詳細でも親の伝播を止める（一覧では goToRound が呼ばれてしまう）
+        if (typeof e.stopPropagation === 'function') e.stopPropagation();
+        openMemberSwapModalFromEl(el);
+      }
+    }
+
+    // 試合タイプとスロットから期待性別を導出
+    //   - 男子ダブルス / 女子ダブルス / シングルス（男）/ シングルス（女）は性別固定
+    //   - ミックスダブルス は slot ごとに固定 (a1/b1=男, a2/b2=女)
+    //   - それ以外（未知 type）は null を返し、フィルタしない（後方互換）
+    function _expectedGenderForSlot(type, slot) {
+      var t = String(type || '');
+      if (t === '男子ダブルス') return '男';
+      if (t === '女子ダブルス') return '女';
+      if (t === 'シングルス（男）') return '男';
+      if (t === 'シングルス（女）') return '女';
+      if (t === 'ミックスダブルス') {
+        if (slot === 'a1' || slot === 'b1') return '男';
+        if (slot === 'a2' || slot === 'b2') return '女';
+      }
+      return null;
+    }
+
+    async function openMemberSwapModal(round, idx, slot, currentName) {
+      // 該当ラウンドを取得
+      var r = await window.store.get('rounds', round);
+      if (!r || !Array.isArray(r.matches) || !r.matches[idx]) {
+        alert('対象の試合が見つかりませんでした');
+        return;
+      }
+      var m = r.matches[idx];
+      var teamSide = (slot === 'a1' || slot === 'a2') ? 'A' : 'B';
+      var expectedGender = _expectedGenderForSlot(m.type, slot);
+
+      // 全メンバーから候補抽出
+      var all = await window.store.getAll('members');
+
+      // 同ラウンド内で既に出場中のメンバーを集計（自分の試合の他スロット + 他の試合全体）
+      // 自分自身（slot 位置の currentName）は当然「他スロット」ではないので除外しない
+      var usedInRound = {};
+      r.matches.forEach(function (mm, i) {
+        ['a1', 'a2', 'b1', 'b2'].forEach(function (s) {
+          if (i === idx && s === slot) return;  // 自分自身は除外しない（=候補に残しはしないが usedInRound に入れない）
+          var n = mm && mm[s];
+          if (n) usedInRound[n] = true;
+        });
+      });
+
+      var candidates = all.filter(function (p) {
+        if (!p || !p.name) return false;
+        if (p.team !== teamSide) return false;
+        if (expectedGender && p.gender !== expectedGender) return false;
+        if (usedInRound[p.name]) return false;
+        return true;
+      });
+
+      // 候補は名前順（読みやすさ）
+      candidates.sort(function (a, b) { return String(a.name).localeCompare(String(b.name), 'ja'); });
+
+      // 各候補の予定試合数を集計（全 rounds 横断）
+      var plannedCounts;
+      try {
+        plannedCounts = await computePlannedMatchesPerMember();
+      } catch (e) {
+        plannedCounts = {};
+      }
+
+      _swapModalState = { round: round, idx: idx, slot: slot, oldName: currentName };
+      // モーダル DOM 構築
+      var title = document.getElementById('swap-modal-title');
+      var list = document.getElementById('swap-candidate-list');
+      title.textContent = (currentName || '(空き)') + ' → 誰に変更しますか?';
+
+      if (candidates.length === 0) {
+        list.innerHTML = '<li class="candidate-empty">該当する候補メンバーがいません（同ラウンド既出 or 性別・チーム不一致）</li>';
+      } else {
+        list.innerHTML = candidates.map(function (p) {
+          var total = plannedCounts[p.name] ? plannedCounts[p.name].total : 0;
+          var meta = (p.gender || '') + ' / 予定' + total + '試合';
+          // currentName 自身も候補に出る場合は (現在) と表示。安全のためタップ可能のまま残す
+          var marker = (p.name === currentName) ? ' (現在)' : '';
+          return '<li role="button" tabindex="0"' +
+            ' data-cand-name="' + escapeHtml(p.name) + '"' +
+            ' onclick="confirmMemberSwap(this.getAttribute(\'data-cand-name\'))"' +
+            ' onkeydown="handleCandidateKey(event, this);">' +
+            '<span class="candidate-name">' + escapeHtml(p.name) + escapeHtml(marker) + '</span>' +
+            '<span class="candidate-meta">' + escapeHtml(meta) + '</span>' +
+            '</li>';
+        }).join('');
+      }
+
+      var overlay = document.getElementById('member-swap-modal');
+      overlay.classList.add('open');
+      overlay.setAttribute('aria-hidden', 'false');
+      // 背景クリックで閉じる
+      overlay.onclick = function (ev) {
+        if (ev.target === overlay) closeMemberSwapModal();
+      };
+      // Esc で閉じる
+      document.addEventListener('keydown', _swapEscHandler);
+
+      // 最初の候補にフォーカス（キーボードユーザー用）
+      setTimeout(function () {
+        var first = list.querySelector('li[role="button"]');
+        if (first && typeof first.focus === 'function') first.focus();
+      }, 0);
+    }
+
+    function _swapEscHandler(e) {
+      if (e.key === 'Escape') closeMemberSwapModal();
+    }
+
+    function handleCandidateKey(e, el) {
+      if (!e) return;
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+        e.preventDefault();
+        var name = el.getAttribute('data-cand-name');
+        confirmMemberSwap(name);
+      }
+    }
+
+    function closeMemberSwapModal() {
+      var overlay = document.getElementById('member-swap-modal');
+      if (!overlay) return;
+      overlay.classList.remove('open');
+      overlay.setAttribute('aria-hidden', 'true');
+      overlay.onclick = null;
+      document.removeEventListener('keydown', _swapEscHandler);
+      _swapModalState = null;
+    }
+
+    // 候補をタップしたとき: matches[idx][slot] を上書き保存 → 再描画
+    async function confirmMemberSwap(newName) {
+      if (!_swapModalState) return;
+      var st = _swapModalState;
+      if (!newName) return;
+      if (newName === st.oldName) {
+        // 同じ人を選んだ場合は何もせず閉じる
+        closeMemberSwapModal();
+        return;
+      }
+      try {
+        var r = await window.store.get('rounds', st.round);
+        if (!r || !Array.isArray(r.matches) || !r.matches[st.idx]) {
+          alert('対象の試合が見つかりませんでした');
+          closeMemberSwapModal();
+          return;
+        }
+        // スコア・winner は維持（メンバー差し替えだけ）
+        r.matches[st.idx][st.slot] = newName;
+        await window.store.put('rounds', r);
+        closeMemberSwapModal();
+
+        // 再描画: 現在のビューに応じて呼び分ける
+        //   ROUND がグローバルに定義され（ラウンド詳細表示中）、現在のラウンドと一致すれば loadRound
+        //   そうでなければ loadRounds (一覧)
+        var hash = String(location.hash || '');
+        if (hash.indexOf('view=round') >= 0 && typeof ROUND !== 'undefined' && ROUND === st.round) {
+          await loadRound();
+        } else {
+          await loadRounds();
+        }
+        // 簡易トースト的に alert（既存パターン踏襲）
+        // 機能B (2026-05-26): スマホで邪魔にならないよう短文
+        // alert は同期ブロックするが、Playwright テストでも捕捉しやすい
+        // ※ 仕様: 確認ダイアログ「変更しました」or トースト → alert で対応
+        try {
+          alert(st.oldName + ' を ' + newName + ' に変更しました');
+        } catch (e) { /* noop */ }
+      } catch (err) {
+        alert('メンバー差し替え失敗: ' + ((err && err.message) || String(err)));
+        closeMemberSwapModal();
+      }
+    }
+
     // ─── 画面2: ラウンド詳細 ───────────────────────────────
     var currentRoundData = null;
 
@@ -1482,6 +1853,23 @@
         var scoreA = m.scoreA != null ? m.scoreA : '';
         var scoreB = m.scoreB != null ? m.scoreB : '';
         var winner = m.winner || '-';
+        // 機能B (2026-05-26): ラウンド詳細画面のメンバー名もクリック可能化
+        //   - .player 内に .swap-name 子要素として配置
+        //   - 名前部分のみクリック領域。.player のレイアウト (padding 等) は維持
+        var swapPlayer = function (slot, name) {
+          if (!name) return '';
+          return '<div class="player">' +
+            '<span class="swap-name" role="button" tabindex="0"' +
+              ' data-round="' + escapeHtml(String(ROUND)) + '"' +
+              ' data-idx="' + escapeHtml(String(m.idx)) + '"' +
+              ' data-slot="' + escapeHtml(slot) + '"' +
+              ' data-name="' + escapeHtml(name) + '"' +
+              ' onclick="openMemberSwapModalFromEl(this);"' +
+              ' onkeydown="handleSwapNameKey(event, this);">' +
+              escapeHtml(name) +
+            '</span>' +
+          '</div>';
+        };
         return '<div class="match-card" data-idx="' + m.idx + '">' +
           '<div class="match-header">' +
             '<span class="court-badge">コート ' + escapeHtml(String(m.court)) + '</span>' +
@@ -1489,13 +1877,13 @@
           '</div>' +
           '<div class="players">' +
             '<div class="team team-a">' +
-              '<div class="player">' + escapeHtml(m.a1) + '</div>' +
-              (m.a2 ? '<div class="player">' + escapeHtml(m.a2) + '</div>' : '') +
+              swapPlayer('a1', m.a1) +
+              (m.a2 ? swapPlayer('a2', m.a2) : '') +
             '</div>' +
             '<div class="vs">vs</div>' +
             '<div class="team team-b">' +
-              '<div class="player">' + escapeHtml(m.b1) + '</div>' +
-              (m.b2 ? '<div class="player">' + escapeHtml(m.b2) + '</div>' : '') +
+              swapPlayer('b1', m.b1) +
+              (m.b2 ? swapPlayer('b2', m.b2) : '') +
             '</div>' +
           '</div>' +
           '<div class="score-row">' +
