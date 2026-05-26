@@ -1,7 +1,7 @@
 {
   "name": "テニス対戦管理",
   "short_name": "テニス対戦",
-  "start_url": "./index.html",
+  "start_url": "./tennis-offline.html",
   "display": "standalone",
   "background_color": "#ffffff",
   "theme_color": "#2563eb",

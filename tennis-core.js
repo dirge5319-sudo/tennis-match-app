@@ -1099,6 +1099,74 @@ function buildRound_(ctx, round, slotOverride) {
     matches.push(m);
   }
 
+  // ── 性別整合 defensive check（2026-05-26 オーナー実機報告対応） ──
+  //   オーナー報告:「女子なのに男子ダブルスが入っている」。
+  //   tryDoubles / tryMixed は呼出時に mA/fA/mB/fB で性別フィルタ済のため、
+  //   ロジック上は本来不整合は起き得ない (core.test.js シナリオ⑪⑫で網羅検証)。
+  //   ただしオーナー実機 DB に gender='male'/null/空欄等の異常データが紛れた場合、
+  //   parseGender_ がすべて '男' に倒すため「実態は女性なのに登録時点で '男' になっている」
+  //   メンバーが男ダブに混入する。
+  //
+  //   ここでは matches 生成直後に type と実メンバー性別を逆照合し、不整合があれば
+  //   console.error で詳細を出力する。エラー時もロジックは止めず、UI 側で気づける
+  //   情報を残すのみ（実害は IndexedDB のデータ修正で解消する）。
+  //
+  //   照合方針:
+  //     1) ctx.teamA/teamB の name→gender マップを構築
+  //     2) 各 match で type と (a1,a2,b1,b2) の性別を突合
+  //     3) 不整合 type 別:
+  //        - 男ダブ: 4人全員 '男' 必須
+  //        - 女ダブ: 4人全員 '女' 必須
+  //        - ミックス: A 側 (a1,a2) 男女1人ずつ・B 側 (b1,b2) 男女1人ずつ
+  //   仕様 §4-2 とも整合（type 別の性別構成は明示）。
+  const __genderMap = {};
+  ctx.teamA.forEach(p => { __genderMap[p.name] = p.gender; });
+  ctx.teamB.forEach(p => { __genderMap[p.name] = p.gender; });
+  matches.forEach(m => {
+    const aNames = [m.a1, m.a2].filter(Boolean);
+    const bNames = [m.b1, m.b2].filter(Boolean);
+    const allNames = [...aNames, ...bNames];
+    const aGenders = aNames.map(n => __genderMap[n]);
+    const bGenders = bNames.map(n => __genderMap[n]);
+    let mismatch = false;
+    let detail = '';
+    if (m.type === CATEGORY.MENS_DOUBLES) {
+      const wrong = allNames.filter(n => __genderMap[n] !== GENDER.MALE);
+      if (wrong.length > 0) {
+        mismatch = true;
+        detail = `男子ダブルスに非男性メンバー混入: ${JSON.stringify(wrong.map(n => ({ name: n, gender: __genderMap[n] })))}`;
+      }
+    } else if (m.type === CATEGORY.WOMENS_DOUBLES) {
+      const wrong = allNames.filter(n => __genderMap[n] !== GENDER.FEMALE);
+      if (wrong.length > 0) {
+        mismatch = true;
+        detail = `女子ダブルスに非女性メンバー混入: ${JSON.stringify(wrong.map(n => ({ name: n, gender: __genderMap[n] })))}`;
+      }
+    } else if (m.type === CATEGORY.MIXED_DOUBLES) {
+      const aOk = aGenders.length === 2
+        && aGenders.filter(g => g === GENDER.MALE).length === 1
+        && aGenders.filter(g => g === GENDER.FEMALE).length === 1;
+      const bOk = bGenders.length === 2
+        && bGenders.filter(g => g === GENDER.MALE).length === 1
+        && bGenders.filter(g => g === GENDER.FEMALE).length === 1;
+      if (!aOk || !bOk) {
+        mismatch = true;
+        detail = `ミックスダブルスの男女構成異常: A=${JSON.stringify(aGenders)} B=${JSON.stringify(bGenders)}`;
+      }
+    }
+    if (mismatch) {
+      // ブラウザ実機・Node テスト両対応で console.error
+      //   実機ではブラウザの DevTools / DB データ不整合の発見トリガーになる
+      //   テストでは出力されないようテスト側で個別検証する設計
+      // eslint-disable-next-line no-console
+      console.error('[tennis-core] 性別整合エラー (R' + round + ' C' + (m.court || '?') + '): ' + detail
+        + ' / match=' + JSON.stringify(m)
+        + ' / 対処: メンバー登録画面で対象メンバーの性別を確認・修正してください');
+      // フラグを試合オブジェクトにも残し、UI 側で表示判断可能にする（後方互換: 未参照でも害なし）
+      m._genderMismatch = detail;
+    }
+  });
+
   return matches;
 }
 
