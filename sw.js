@@ -2,7 +2,12 @@
 // ----------------------------------------------------------------------
 // 役割:
 //   - tennis-offline.html とその依存資産を precache
-//   - fetch ハンドラで cache-first 戦略（オフライン起動可能化）
+//   - fetch ハンドラで戦略を分岐
+//       * HTML navigation (mode==='navigate'): network-first
+//         → 新版がデプロイされた時に旧キャッシュで詰まないよう、まずネットワークを試みる
+//         → 失敗時のみ cache fallback（オフライン起動可能性は維持）
+//       * 静的アセット (js/css/json/svg 等): cache-first
+//         → 高速化と帯域節約のため
 //   - install / activate で旧 cache を掃除
 //
 // 仕様メモ:
@@ -14,8 +19,9 @@
 // キャッシュ更新運用:
 //   - CACHE_NAME のバージョン文字列を上げると、activate イベントで旧 cache を削除し
 //     新 cache に切り替わる（明示的更新トリガー）
+//   - 2026-05-26b: スマホ致命バグ修正に伴いバンプ。旧キャッシュ強制更新。
 
-const CACHE_NAME = 'tennis-offline-v1-20260526';
+const CACHE_NAME = 'tennis-offline-v2-20260526b';
 
 // precache 対象（manifest と同じ相対パス・全て同一フォルダ配下）
 const ASSETS = [
@@ -50,14 +56,37 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
-// fetch: cache-first → 無ければ network → どちらも失敗時はそのまま fetch エラー
+// fetch ハンドラ:
+//   - GET 以外は素通し
+//   - HTML navigation は network-first（新版を取りにいく / 失敗時のみ cache）
+//   - それ以外は cache-first（高速化）
 self.addEventListener('fetch', (event) => {
-  // GET 以外（POST/PUT 等）はそのまま素通し（IndexedDB は別レイヤなのでここでは対象外）
-  if (event.request.method !== 'GET') return;
+  const req = event.request;
+  if (req.method !== 'GET') return;
+
+  // HTML navigation 判定:
+  //   - req.mode === 'navigate'（最上位 navigation）
+  //   - もしくは Accept ヘッダに text/html を含むリクエスト（保険）
+  const acceptHeader = req.headers && req.headers.get ? req.headers.get('accept') : '';
+  const isNavigation = req.mode === 'navigate' ||
+    (typeof acceptHeader === 'string' && acceptHeader.indexOf('text/html') !== -1);
+
+  if (isNavigation) {
+    // network-first: ネットワーク成功時はキャッシュも更新、失敗時のみキャッシュにフォールバック
+    event.respondWith(
+      fetch(req).then((res) => {
+        try {
+          const clone = res.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(req, clone));
+        } catch (_) { /* cache 更新失敗は無視 */ }
+        return res;
+      }).catch(() => caches.match(req).then((cached) => cached || caches.match('./tennis-offline.html')))
+    );
+    return;
+  }
+
+  // 静的アセット: cache-first
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached;
-      return fetch(event.request);
-    })
+    caches.match(req).then((cached) => cached || fetch(req))
   );
 });

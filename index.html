@@ -531,6 +531,10 @@
        - bottom sheet 風: スマホ幅では下から、PC幅では中央寄せ
        - タップ領域は min-height: 44px（iOS HIG 準拠） */
     .swap-name {
+      /* 2026-05-26 mobile-critical-fix:
+         レイアウトを崩さず、タップ可能領域だけを 44px 以上に拡張する。
+         可視領域はテキストのまま。::before で透明な拡張領域をオーバーレイ。 */
+      position: relative;
       cursor: pointer;
       text-decoration: underline dotted;
       text-underline-offset: 2px;
@@ -538,6 +542,17 @@
       padding: 2px 4px;
       border-radius: 4px;
       transition: background 0.15s;
+      -webkit-tap-highlight-color: rgba(0,122,255,0.2);
+    }
+    /* 透明な拡張タップ領域。可視レイアウトを変更しないため、
+       上下に -12px ずつ伸ばして合計タップ高さ 44px 以上を確保。
+       (本体高さ 22px + 上下 12px ずつ = 46px ≥ 44px) */
+    .swap-name::before {
+      content: '';
+      position: absolute;
+      top: -12px; bottom: -12px;
+      left: -8px; right: -8px;
+      /* 透明なまま、タップ判定の範囲だけ拡張 */
     }
     .swap-name:hover, .swap-name:active { background: rgba(0,122,255,0.12); }
     .swap-name:focus-visible { outline: 2px solid #0066cc; outline-offset: 2px; }
@@ -641,7 +656,7 @@
   <!-- ヘッダー: タイトルとリフレッシュボタン -->
   <header>
     <h1 id="page-title">テニス対戦管理</h1>
-    <button id="btn-refresh" onclick="refresh()" aria-label="更新">&#x21BB;</button>
+    <button id="btn-refresh" type="button" onclick="refresh()" aria-label="更新">&#x21BB;</button>
   </header>
 
   <!-- メインコンテンツ（動的に書き換える） -->
@@ -748,7 +763,7 @@
       main.removeAttribute('aria-busy');
       main.innerHTML =
         '<div class="error">エラー: ' + escapeHtml(String(msg)) + '<br><br>' +
-        '<button onclick="refresh()" style="padding:10px 20px;border-radius:8px;border:none;background:#007aff;color:#fff;font-size:15px;cursor:pointer;">再読み込み</button>' +
+        '<button type="button" onclick="refresh()" style="padding:10px 20px;border-radius:8px;border:none;background:#007aff;color:#fff;font-size:15px;cursor:pointer;">再読み込み</button>' +
         '</div>';
     }
     function escapeHtml(str) {
@@ -1543,7 +1558,7 @@
           matchesHtml = '<div class="round-card-matches">' + rowsHtml + '</div>';
         }
         return '<div class="round-card" onclick="goToRound(' + r.round + ')" onkeydown="handleRoundCardKey(event, ' + r.round + ')" role="button" tabindex="0">' +
-          '<button class="round-card-delete" onclick="event.stopPropagation(); deleteRound(' + r.round + ')" aria-label="第' + r.round + 'ラウンドを削除">×</button>' +
+          '<button type="button" class="round-card-delete" onclick="event.stopPropagation(); deleteRound(' + r.round + ')" aria-label="第' + r.round + 'ラウンドを削除">×</button>' +
           '<div class="round-card-header">' +
             '<div class="round-card-title">第' + escapeHtml(String(r.round)) + 'ラウンド</div>' +
             '<div class="round-card-status ' + statusClass + '">' + statusLabel + '</div>' +
@@ -1556,7 +1571,7 @@
       main.innerHTML =
         dashboardHtml +
         '<div class="round-list">' + cards + '</div>' +
-        '<button class="footer-btn-danger" onclick="clearAllRounds()">全ラウンドと履歴をクリア</button>';
+        '<button type="button" class="footer-btn-danger" onclick="clearAllRounds()">全ラウンドと履歴をクリア</button>';
     }
 
     // 個別ラウンド削除（確認付き）
@@ -1739,6 +1754,11 @@
       var overlay = document.getElementById('member-swap-modal');
       overlay.classList.add('open');
       overlay.setAttribute('aria-hidden', 'false');
+      // 2026-05-26 mobile-critical-fix:
+      //   モーダル open 中は body スクロールをロック（背景のスクロール抜け / バウンスを防止）
+      //   touch-action: none で iOS の慣性スクロールも止める
+      document.body.style.overflow = 'hidden';
+      document.body.style.touchAction = 'none';
       // 背景クリックで閉じる
       overlay.onclick = function (ev) {
         if (ev.target === overlay) closeMemberSwapModal();
@@ -1773,6 +1793,9 @@
       overlay.setAttribute('aria-hidden', 'true');
       overlay.onclick = null;
       document.removeEventListener('keydown', _swapEscHandler);
+      // 2026-05-26 mobile-critical-fix: body scroll lock 解除
+      document.body.style.overflow = '';
+      document.body.style.touchAction = '';
       _swapModalState = null;
     }
 
@@ -1900,7 +1923,7 @@
       document.getElementById('main').innerHTML =
         '<div class="round-header">' + committedBadge + '</div>' +
         '<div class="match-list">' + matchHtml + '</div>' +
-        '<button class="footer-btn footer-btn-fixed" id="btn-commit" onclick="commitRound()">このラウンドを履歴に確定</button>' +
+        '<button type="button" class="footer-btn footer-btn-fixed" id="btn-commit" onclick="commitRound()">このラウンドを履歴に確定</button>' +
         '<a class="back-link" href="#view=rounds">ラウンド一覧に戻る</a>';
 
       // スコア入力時に勝者をリアルタイム再計算
@@ -2045,8 +2068,8 @@
       currentMembersData = data;
       document.getElementById('main').removeAttribute('aria-busy');
 
-      var teamABtn = '<button class="tab-btn ' + (currentTeamSide === 'A' ? 'active' : '') + '" onclick="switchTeam(\'A\')">' + escapeHtml(data.teamAName) + ' (' + data.teamA.length + ')</button>';
-      var teamBBtn = '<button class="tab-btn ' + (currentTeamSide === 'B' ? 'active' : '') + '" onclick="switchTeam(\'B\')">' + escapeHtml(data.teamBName) + ' (' + data.teamB.length + ')</button>';
+      var teamABtn = '<button type="button" class="tab-btn ' + (currentTeamSide === 'A' ? 'active' : '') + '" onclick="switchTeam(\'A\')">' + escapeHtml(data.teamAName) + ' (' + data.teamA.length + ')</button>';
+      var teamBBtn = '<button type="button" class="tab-btn ' + (currentTeamSide === 'B' ? 'active' : '') + '" onclick="switchTeam(\'B\')">' + escapeHtml(data.teamBName) + ' (' + data.teamB.length + ')</button>';
 
       // spec/feature-member-mix-preference-2026-05-22.md §5-1-2:
       //   各メンバー行にミックス希望 <select> を追加（4択: 指定なし/多め/少なめ/なし）
@@ -2084,7 +2107,7 @@
             opt('none', 'ミックスなし') +
           '</select>' +
           '<div class="member-stats">' + (m.win || 0) + '勝/' + (m.loss || 0) + '負</div>' +
-          '<button class="btn-delete" onclick="deleteMember(' + idx + ')" aria-label="削除">×</button>' +
+          '<button type="button" class="btn-delete" onclick="deleteMember(' + idx + ')" aria-label="削除">×</button>' +
           '<div class="member-planned" data-mname="' + escapeHtml(m.name) + '"' +
                ' role="status" aria-live="polite" aria-atomic="true">' +
             '<span class="mp-label">予定:</span>' +
@@ -2139,10 +2162,10 @@
         '<div class="tab-bar">' + teamABtn + teamBBtn + '</div>' +
         dupWarning +
         '<div class="member-list">' + memberRows + '</div>' +
-        '<button class="btn-add" onclick="addMember()">＋ メンバーを追加</button>' +
+        '<button type="button" class="btn-add" onclick="addMember()">＋ メンバーを追加</button>' +
         mpHint +
         membersPreview +
-        '<button class="footer-btn footer-btn-fixed" id="btn-save-members" onclick="saveMembers()">保存</button>';
+        '<button type="button" class="footer-btn footer-btn-fixed" id="btn-save-members" onclick="saveMembers()">保存</button>';
       // メンバー画面のプレビュー初期描画（保存済データから計算）
       updateMembersPreview();
       // pm-S10 (2026-05-24): 各メンバー行に予定試合数を流し込む（非同期で集計）
@@ -2601,7 +2624,7 @@
           '</div>' +
         '</section>' +
 
-        '<button class="footer-btn footer-btn-fixed" id="btn-save-config" onclick="saveConfig(false)">保存</button>';
+        '<button type="button" class="footer-btn footer-btn-fixed" id="btn-save-config" onclick="saveConfig(false)">保存</button>';
 
       // gm-S11 (2026-05-24): ミックス試合数は設定画面から削除されたため
       //   updateMixRecommend() の呼出も不要（関数は生成画面側で利用するため保持）。
@@ -2997,8 +3020,8 @@
           '</section>' +
 
           '<div class="generate-actions">' +
-            '<button class="generate-btn primary" id="btn-generate-auto" onclick="generateOne()">&#9654; 自動で生成</button>' +
-            '<button class="generate-btn" id="btn-generate-custom" onclick="generateCustom()">&#9999; 空テンプレで作成</button>' +
+            '<button type="button" class="generate-btn primary" id="btn-generate-auto" onclick="generateOne()">&#9654; 自動で生成</button>' +
+            '<button type="button" class="generate-btn" id="btn-generate-custom" onclick="generateCustom()">&#9999; 空テンプレで作成</button>' +
           '</div>';
         // S8 fix (reviewer指摘): 初期描画直後に initialN ぶんを反映
         updateGenerateLabels();
