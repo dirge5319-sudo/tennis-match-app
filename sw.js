@@ -20,8 +20,11 @@
 //   - CACHE_NAME のバージョン文字列を上げると、activate イベントで旧 cache を削除し
 //     新 cache に切り替わる（明示的更新トリガー）
 //   - 2026-05-26b: スマホ致命バグ修正に伴いバンプ。旧キャッシュ強制更新。
+//   - 2026-05-27 v3: 3エージェント独立分析 (mobile-developer/frontend-developer/qa-engineer)
+//     による真因4点修正 (pointer-events:none / .rc-pair padding+margin / hashchange close /
+//     catch touchAction クリア) に伴いバンプ。旧キャッシュ強制更新。
 
-const CACHE_NAME = 'tennis-offline-v2-20260526b';
+const CACHE_NAME = 'tennis-offline-v3-20260527';
 
 // precache 対象（manifest と同じ相対パス・全て同一フォルダ配下）
 const ASSETS = [

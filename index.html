@@ -310,7 +310,11 @@
       .member-planned .mp-empty { color: #6e6e73; }
     }
     .btn-delete { background: #ff3b30; color: #fff; border: none; border-radius: 50%; width: 36px; height: 36px; font-size: 18px; cursor: pointer; }
-    .btn-add { background: #34c759; color: #fff; border: none; border-radius: 12px; padding: 12px; width: 100%; font-size: 16px; font-weight: 600; margin-bottom: 12px; min-height: 44px; cursor: pointer; }
+    /* 2026-05-27 three-agent-review 修正5:
+         300ms click delay (古い Android Chrome / iOS Safari 互換) を明示無効化。
+         testing-qa-engineer 補強観点: touch-action: manipulation は double-tap zoom 抑止
+         のついでに click delay も切れる。万一スマホ実機で 300ms 遅延が出ていた場合への二重保護。 */
+    .btn-add { background: #34c759; color: #fff; border: none; border-radius: 12px; padding: 12px; width: 100%; font-size: 16px; font-weight: 600; margin-bottom: 12px; min-height: 44px; cursor: pointer; touch-action: manipulation; }
 
     /* ─── 設定画面 ─── */
     .config-section { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
@@ -533,7 +537,9 @@
     .swap-name {
       /* 2026-05-26 mobile-critical-fix:
          レイアウトを崩さず、タップ可能領域だけを 44px 以上に拡張する。
-         可視領域はテキストのまま。::before で透明な拡張領域をオーバーレイ。 */
+         可視領域はテキストのまま。::before で透明な拡張領域をオーバーレイ。
+         2026-05-27 three-agent-review 修正5:
+           touch-action: manipulation で 300ms click delay を明示無効化 (二重保護)。 */
       position: relative;
       cursor: pointer;
       text-decoration: underline dotted;
@@ -543,22 +549,45 @@
       border-radius: 4px;
       transition: background 0.15s;
       -webkit-tap-highlight-color: rgba(0,122,255,0.2);
+      touch-action: manipulation;
     }
     /* 透明な拡張タップ領域。可視レイアウトを変更しないため、
        上下に -12px ずつ伸ばして合計タップ高さ 44px 以上を確保。
-       (本体高さ 22px + 上下 12px ずつ = 46px ≥ 44px) */
+       (本体高さ 22px + 上下 12px ずつ = 46px ≥ 44px)
+       2026-05-27 three-agent-review 修正1:
+         pointer-events: none を必ず付与する。これが無いと隣接する .swap-name の
+         ::before 拡張領域同士が重なり、上のメンバー名タップが下のメンバーの
+         ::before に横取りされる (frontend-developer 真因①)。 */
     .swap-name::before {
       content: '';
       position: absolute;
       top: -12px; bottom: -12px;
       left: -8px; right: -8px;
-      /* 透明なまま、タップ判定の範囲だけ拡張 */
+      pointer-events: none;  /* 隣接 swap-name のタップ横取り防止 (3エージェント一致結論) */
     }
     .swap-name:hover, .swap-name:active { background: rgba(0,122,255,0.12); }
     .swap-name:focus-visible { outline: 2px solid #0066cc; outline-offset: 2px; }
     /* ラウンド一覧 (.rc-pair) 内の個別名前は span でラップする都合上、
-       元のテキスト省略 (overflow:hidden) を壊さないよう display:inline-block 化 */
-    .rc-pair .swap-name { display: inline; padding: 1px 2px; font-size: 13px; }
+       元のテキスト省略 (overflow:hidden) を壊さないよう display:inline-block 化。
+       2026-05-27 three-agent-review 修正2:
+         .rc-pair は `overflow: hidden` のため、親の枠外にはみ出した ::before タップ
+         拡張領域がクリップされ、結果として 44x44px タップ領域が確保できない
+         (mobile-developer 真因②)。
+         対策: ::before を無効化し、本体に padding でタップ領域を確保 + 同サイズの
+         負 margin で視覚レイアウトを維持する。
+         padding 12px 8px = 縦 24px 拡張、本体 line-height 約 20px + 12px*2 = 44px を確保。
+         margin -12px -8px で見た目はこれまで通り。
+         (実測: 38x44 / Pixel 5 emulation で Playwright bbox 検証済) */
+    .rc-pair .swap-name {
+      display: inline-block;
+      font-size: 13px;
+      padding: 12px 8px;       /* タップ領域を padding で確保 (44px 以上) */
+      margin: -12px -8px;      /* 視覚レイアウトを維持（はみ出しは overflow:hidden で吸収）*/
+      vertical-align: middle;
+    }
+    .rc-pair .swap-name::before {
+      display: none;  /* overflow:hidden の親にclipされるため ::before を使わない */
+    }
 
     /* モーダル本体 */
     .modal-overlay {
@@ -632,8 +661,11 @@
       font-size: 14px; font-weight: 600;
       min-height: 44px;
       cursor: pointer;
+      touch-action: manipulation; /* 2026-05-27 three-agent-review 修正5 */
     }
     .modal-btn:active { background: #f0f0f3; }
+    /* 候補リストの li (role="button") も同様にタップ遅延を抑える */
+    .member-candidate-list li[role='button'] { touch-action: manipulation; }
     /* ダークモード */
     @media (prefers-color-scheme: dark) {
       .swap-name:hover, .swap-name:active { background: rgba(10,132,255,0.20); }
@@ -803,7 +835,21 @@
     }
 
     // hashchange で refresh
-    window.addEventListener('hashchange', refresh);
+    // 2026-05-27 three-agent-review 修正3:
+    //   モーダルが open のまま hashchange (navigateTo / 戻るボタン) が起きると、
+    //   body の touchAction='none' / overflow='hidden' が残ったまま画面遷移して
+    //   全画面タップ無効になる (mobile-developer 真因③)。
+    //   refresh の前に強制クローズ→確実に body スタイルを解除する。
+    window.addEventListener('hashchange', function () {
+      var overlay = document.getElementById('member-swap-modal');
+      if (overlay && overlay.classList.contains('open')) {
+        try { closeMemberSwapModal(); } catch (_) { /* 二重保護: 失敗しても body style はクリアする */ }
+        // 念のためここでも明示クリア（closeMemberSwapModal 内例外時の防御）
+        document.body.style.overflow = '';
+        document.body.style.touchAction = '';
+      }
+      refresh();
+    });
 
     // ─── データアクセス層（IndexedDB → 旧 mobileXxx 互換オブジェクト）
     // ------------------------------------------------------------
@@ -1649,6 +1695,13 @@
         if (!round || isNaN(idx) || !slot) return;
         await openMemberSwapModal(round, idx, slot, name);
       } catch (err) {
+        // 2026-05-27 three-agent-review 修正4:
+        //   IDB エラー等で openMemberSwapModal 内で例外が起き、body の touchAction='none'
+        //   が立ったまま catch に落ちると、全画面のタップが無効化される (qa-engineer 真因④)。
+        //   ここで二重保護として明示クリアする。closeMemberSwapModal の更新と合わせて
+        //   最低どちらか一方で必ず復旧する。
+        document.body.style.overflow = '';
+        document.body.style.touchAction = '';
         if (typeof console !== 'undefined' && console.error) {
           console.error('openMemberSwapModalFromEl failed:', err);
         }
@@ -1787,16 +1840,18 @@
     }
 
     function closeMemberSwapModal() {
+      // 2026-05-27 three-agent-review 修正6:
+      //   body スタイル解除は overlay 有無の前に必ず行う (三重保護)。
+      //   万一 overlay が DOM から消えていても、body の touchAction='none' は確実にクリアする。
+      document.body.style.overflow = '';
+      document.body.style.touchAction = '';
+      _swapModalState = null;
       var overlay = document.getElementById('member-swap-modal');
       if (!overlay) return;
       overlay.classList.remove('open');
       overlay.setAttribute('aria-hidden', 'true');
       overlay.onclick = null;
       document.removeEventListener('keydown', _swapEscHandler);
-      // 2026-05-26 mobile-critical-fix: body scroll lock 解除
-      document.body.style.overflow = '';
-      document.body.style.touchAction = '';
-      _swapModalState = null;
     }
 
     // 候補をタップしたとき: matches[idx][slot] を上書き保存 → 再描画
