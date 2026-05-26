@@ -812,7 +812,9 @@
         var s = statByName[m.name] || { played: 0, win: 0, loss: 0 };
         return {
           name:   String(m.name || ''),
-          gender: m.gender === '女' ? '女' : '男',
+          // 2026-05-26: 性別バグ真因対策 — 三項演算子で '' を '男' に倒すと
+          //   未選択メンバーが男ダブに混入する。'男'/'女' のみ保持、それ以外は ''。
+          gender: (m.gender === '女' || m.gender === '男') ? m.gender : '',
           level:  m.level != null && !isNaN(Number(m.level)) ? Number(m.level) : null,
           played: s.played, win: s.win, loss: s.loss,
           mixedPreference: normalizePreference(m.mixedPreference),
@@ -854,7 +856,11 @@
         var row = {
           team:   teamSide,
           name:   name,
-          gender: String(m.gender || '男').trim() === '女' ? '女' : '男',
+          // 2026-05-26 オーナー要求 (gender-default-empty):
+          //   '男' / '女' 以外（'' / null / undefined）は '' (未選択) のまま保存して
+          //   次回再表示時に「未選択」検知が継続できるようにする。
+          //   従来は '男' フォールバックだったため、新規追加 → 保存 → 再オープンで '男' に誤確定していた。
+          gender: (m.gender === '男' || m.gender === '女') ? m.gender : '',
           level:  m.level != null && !isNaN(Number(m.level)) ? Number(m.level) : null,
           mixedPreference: prefNorm,
         };
@@ -1080,7 +1086,8 @@
         return {
           name: m.name,
           level: m.level || 0,
-          gender: m.gender === '女' ? '女' : '男',
+          // 2026-05-26: 性別バグ真因対策 — 未選択は '' のまま渡し、parseGender_ で null 化される
+          gender: (m.gender === '女' || m.gender === '男') ? m.gender : '',
           mixedPreference: normPref(m.mixedPreference),
         };
       });
@@ -1088,7 +1095,8 @@
         return {
           name: m.name,
           level: m.level || 0,
-          gender: m.gender === '女' ? '女' : '男',
+          // 2026-05-26: 性別バグ真因対策 — 未選択は '' のまま渡し、parseGender_ で null 化される
+          gender: (m.gender === '女' || m.gender === '男') ? m.gender : '',
           mixedPreference: normPref(m.mixedPreference),
         };
       });
@@ -1655,7 +1663,11 @@
         return '<div class="member-row" data-idx="' + idx + '">' +
           '<input type="text" class="member-name" value="' + escapeHtml(m.name) + '" placeholder="名前">' +
           '<input type="number" inputmode="numeric" pattern="[0-9]*" min="1" max="10" class="member-level" value="' + (m.level != null ? m.level : '') + '" placeholder="Lv">' +
+          // 2026-05-26 オーナー要求: 新規追加メンバーの gender 初期値を空にして保存前に検知できるようにする
+          //   既存メンバー (gender='男'|'女') はそのまま selected が当たる。
+          //   addMember() で空文字 '' を生成 → どの option も selected にならず「未選択」が表示される。
           '<select class="member-gender">' +
+            '<option value=""' + (m.gender !== '男' && m.gender !== '女' ? ' selected' : '') + '>未選択</option>' +
             '<option value="男"' + (m.gender === '男' ? ' selected' : '') + '>男</option>' +
             '<option value="女"' + (m.gender === '女' ? ' selected' : '') + '>女</option>' +
           '</select>' +
@@ -1821,12 +1833,14 @@
         };
         var teamA = all.filter(function (m) { return m && m.team === 'A'; }).map(function (m) {
           return { name: m.name, level: m.level || 0,
-                   gender: m.gender === '女' ? '女' : '男',
+                   // 2026-05-26: 性別バグ真因対策 — 未選択は '' のまま渡し、parseGender_ で null 化される
+                   gender: (m.gender === '女' || m.gender === '男') ? m.gender : '',
                    mixedPreference: normPref(m.mixedPreference) };
         });
         var teamB = all.filter(function (m) { return m && m.team === 'B'; }).map(function (m) {
           return { name: m.name, level: m.level || 0,
-                   gender: m.gender === '女' ? '女' : '男',
+                   // 2026-05-26: 性別バグ真因対策 — 未選択は '' のまま渡し、parseGender_ で null 化される
+                   gender: (m.gender === '女' || m.gender === '男') ? m.gender : '',
                    mixedPreference: normPref(m.mixedPreference) };
         });
         if (teamA.length === 0 && teamB.length === 0) {
@@ -1923,7 +1937,10 @@
     function addMember() {
       collectCurrentMembers();
       // mixedPreference 初期値は null（=指定なし）。spec §4-1 デフォルト
-      var newMember = { name: '', level: 5, gender: '男', played: 0, win: 0, loss: 0, mixedPreference: null };
+      // 2026-05-26 オーナー要求: gender 初期値は '' (未選択) に変更。
+      //   従来は '男' 固定 → 性別未確認のまま保存される事故が起きていたため、
+      //   保存前バリデーション (saveMembers) で空チェックして気づけるようにする。
+      var newMember = { name: '', level: 5, gender: '', played: 0, win: 0, loss: 0, mixedPreference: null };
       if (currentTeamSide === 'A') currentMembersData.teamA.push(newMember);
       else currentMembersData.teamB.push(newMember);
       renderMembers(currentMembersData);
@@ -1939,12 +1956,41 @@
     }
 
     // チームA → チームB の順で保存
+    // 2026-05-26 オーナー要求 (gender-default-empty スプリント):
+    //   性別が未選択 (gender === '') のメンバーがいたら保存前にアラートで対象名を列挙し、
+    //   オーナー判断で「強制保存」か「中止」を選べるようにする。
+    //   既存データ ('男' / '女') への影響なし。
     async function saveMembers() {
       collectCurrentMembers();
       var btn = document.getElementById('btn-save-members');
-      btn.disabled = true; btn.textContent = '保存中...';
       var teamACopy = JSON.parse(JSON.stringify(currentMembersData.teamA));
       var teamBCopy = JSON.parse(JSON.stringify(currentMembersData.teamB));
+
+      // ─── 性別未選択チェック（保存前）────────────────────────
+      //   teamA/teamB 横断で gender が '男' / '女' 以外（'' / null / undefined）のメンバー名を集める
+      var unsetNames = [];
+      teamACopy.forEach(function (m) {
+        if (m.gender !== '男' && m.gender !== '女') {
+          unsetNames.push((currentMembersData.teamAName || 'A') + ': ' + (m.name || '空欄'));
+        }
+      });
+      teamBCopy.forEach(function (m) {
+        if (m.gender !== '男' && m.gender !== '女') {
+          unsetNames.push((currentMembersData.teamBName || 'B') + ': ' + (m.name || '空欄'));
+        }
+      });
+      if (unsetNames.length > 0) {
+        var msg = '性別が未選択のメンバーがいます:\n\n' +
+                  unsetNames.join('\n') +
+                  '\n\nOK: そのまま強制保存 / キャンセル: 保存中止して修正に戻る';
+        if (!confirm(msg)) {
+          // オーナー判断: 保存中止
+          return;
+        }
+        // 強制保存続行（オーナー承知の上）
+      }
+
+      btn.disabled = true; btn.textContent = '保存中...';
       try {
         await dbSaveMembers('A', teamACopy);
         await dbSaveMembers('B', teamBCopy);
@@ -2587,7 +2633,8 @@
           return {
             name: m.name,
             level: m.level || 0,
-            gender: m.gender === '女' ? '女' : '男',
+            // 2026-05-26: 性別バグ真因対策 — 未選択は '' のまま渡し、parseGender_ で null 化される
+            gender: (m.gender === '女' || m.gender === '男') ? m.gender : '',
             mixedPreference: normPref(m.mixedPreference),
           };
         });
@@ -2595,7 +2642,8 @@
           return {
             name: m.name,
             level: m.level || 0,
-            gender: m.gender === '女' ? '女' : '男',
+            // 2026-05-26: 性別バグ真因対策 — 未選択は '' のまま渡し、parseGender_ で null 化される
+            gender: (m.gender === '女' || m.gender === '男') ? m.gender : '',
             mixedPreference: normPref(m.mixedPreference),
           };
         });
@@ -2884,7 +2932,8 @@
         return {
           name: m.name,
           level: m.level || 0,
-          gender: m.gender === '女' ? '女' : '男',
+          // 2026-05-26: 性別バグ真因対策 — 未選択は '' のまま渡し、parseGender_ で null 化される
+          gender: (m.gender === '女' || m.gender === '男') ? m.gender : '',
           mixedPreference: normPref(m.mixedPreference),
         };
       });
@@ -2892,7 +2941,8 @@
         return {
           name: m.name,
           level: m.level || 0,
-          gender: m.gender === '女' ? '女' : '男',
+          // 2026-05-26: 性別バグ真因対策 — 未選択は '' のまま渡し、parseGender_ で null 化される
+          gender: (m.gender === '女' || m.gender === '男') ? m.gender : '',
           mixedPreference: normPref(m.mixedPreference),
         };
       });

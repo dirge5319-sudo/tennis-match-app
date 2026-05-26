@@ -202,9 +202,15 @@ function parseLevel_(v) {
   return isNaN(n) ? 0 : n;
 }
 
-// 性別を正規化。空欄・不明は男扱い（後方互換のためのデフォルト）
+// 性別を正規化。
+// 2026-05-26 性別バグ真因対策:
+//   旧仕様: 空欄・null・undefined → '男' に倒していた → 未選択メンバーが男ダブに混入する根本原因。
+//   新仕様: 空欄・null・undefined → null を返す。後段のフィルタ (=== GENDER.MALE / FEMALE) は
+//           null を一致させないため、対象から除外される (誰の試合にも入らない)。
+//   '男'/'女' 以外の異常値 ('male'/'M'/'unknown' 等) は従来通り MALE にフォールバック (英語値の
+//   保護はそのまま維持。日本語空欄のみ未選択扱いに変える)。
 function parseGender_(v) {
-  if (v === '' || v == null) return GENDER.MALE;
+  if (v === '' || v == null) return null;
   const s = String(v).trim();
   if (s === '女' || /^F$/i.test(s) || /^W$/i.test(s) || /female/i.test(s)) return GENDER.FEMALE;
   return GENDER.MALE;
