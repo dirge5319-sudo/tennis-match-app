@@ -330,6 +330,20 @@
     .generate-section { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
     .generate-section h2 { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
     .generate-section .hint { font-size: 12px; color: #6e6e73; margin-bottom: 8px; }
+
+    /* 2026-05-26 同名禁止バリデーション: メンバー画面の注意書き（タブ直下） */
+    /* スマホで目立たせるため警告色 (薄黄 + 茶色文字 + 左帯) を採用。 */
+    /* ダークモード上書きは @media (prefers-color-scheme: dark) 内 .dup-warning-hint で。 */
+    .dup-warning-hint {
+      background: #fff4d4;
+      color: #9a6e00;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border-left: 4px solid #f0b800;
+      margin-bottom: 12px;
+      font-size: 13px;
+      line-height: 1.5;
+    }
     .generate-actions { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
     .generate-btn { padding: 14px; background: #fff; border: 1px solid #007aff; color: #007aff; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; min-height: 48px; }
     .generate-btn.primary { background: #007aff; color: #fff; }
@@ -408,6 +422,10 @@
         background: #2c2c2e; border-color: #38383a; color: #f5f5f7;
       }
       .round-card-meta, .match-type, .placeholder p, .stats-meta, .hint { color: #a0a0a8; }
+      /* 2026-05-26 同名禁止バリデーション: 注意書きヒントのダークモード調整 */
+      /* ライトでは薄黄 (#fff4d4) + 茶色文字 (#9a6e00) だが、ダークでは可視性のため
+         背景を彩度落とした濃いめの黄色 (#4a3e10)、文字色を明るい黄 (#ffd866) にする */
+      .dup-warning-hint { background: #4a3e10 !important; color: #ffd866 !important; border-left-color: #ffd866 !important; }
       /* 中優先 #3: ダークモードで × ボタンが明るすぎるので彩度を落として視覚ノイズ低減 */
       .round-card-delete { background: #c93b30; }
       .round-card-delete:active { background: #a32a20; }
@@ -1720,8 +1738,18 @@
           '</div>' +
         '</section>';
 
+      // 2026-05-26 同名禁止バリデーション (案A) UI: 注意書きをタブ直下に表示
+      //   saveMembers の同名検知 alert と同等の趣旨を「保存前」にも見えるようにする。
+      //   スマホで目立つよう警告色 + 左帯付き。ダークモード対応は CSS 側で上書き。
+      //   role="note" を付けて支援技術にも届くようにする。
+      var dupWarning =
+        '<p class="hint dup-warning-hint" role="note" id="dup-warning">' +
+          '⚠️ 同じ名前のメンバーは登録できません。「田中A」「田中B」「田中 太郎」など区別できる名前にしてください。' +
+        '</p>';
+
       document.getElementById('main').innerHTML =
         '<div class="tab-bar">' + teamABtn + teamBBtn + '</div>' +
+        dupWarning +
         '<div class="member-list">' + memberRows + '</div>' +
         '<button class="btn-add" onclick="addMember()">＋ メンバーを追加</button>' +
         mpHint +
