@@ -1085,18 +1085,21 @@
       var hist = await window.store.getAll('history');
       var ret = rounds.map(function (r) {
         var matches = Array.isArray(r.matches) ? r.matches : [];
-        // 有効な試合のみ抽出（court 番号があるもの）
-        var validMatches = matches.filter(function (m) { return m && typeof m.court === 'number' && m.court > 0; });
-        var matchCount = validMatches.length;
-        // committed 判定: history に同 round の行があり、いずれかのスコアが非null
-        var hForR = hist.filter(function (h) { return Number(h.round) === Number(r.round); });
-        var committed = hForR.length > 0 && hForR.some(function (h) {
-          return (h.scoreA != null && h.scoreA !== '') || (h.scoreB != null && h.scoreB !== '');
-        });
-        // 試合配列を一覧表示用に整形（dbGetRound と同じキー構成）
-        var matchesOut = validMatches.map(function (m, idx) {
-          return {
-            idx:    idx,
+        // 2026-05-27 3エージェント独立分析 修正2:
+        //   バグ:「validMatches.map((m, idx) => ...)」で idx を採番すると、
+        //         court=0 等の無効行が間に挟まったとき idx が "filter後配列の位置" になり、
+        //         r.matches の実 idx とズレる。
+        //         このズレは openMemberSwapModal(round, idx, slot, name) で
+        //         r.matches[idx] を参照したときに別試合を編集してしまう致命バグになる。
+        //   修正: matches.forEach の i (=r.matches の実 idx) を idx に採用し、
+        //         無効行はスキップ。これで一覧UIから渡る idx = r.matches[idx] が一致する。
+        var validMatches = [];
+        var matchesOut = [];
+        matches.forEach(function (m, idx) {
+          if (!m || typeof m.court !== 'number' || m.court <= 0) return;
+          validMatches.push(m);
+          matchesOut.push({
+            idx:    idx,  // r.matches の実 idx（filter 後ではなく元配列の位置）
             court:  Number(m.court) || (idx + 1),
             type:   String(m.type || ''),
             a1:     String(m.a1 || ''),
@@ -1106,7 +1109,13 @@
             scoreA: m.scoreA == null || m.scoreA === '' ? null : Number(m.scoreA),
             scoreB: m.scoreB == null || m.scoreB === '' ? null : Number(m.scoreB),
             winner: String(m.winner || ''),
-          };
+          });
+        });
+        var matchCount = validMatches.length;
+        // committed 判定: history に同 round の行があり、いずれかのスコアが非null
+        var hForR = hist.filter(function (h) { return Number(h.round) === Number(r.round); });
+        var committed = hForR.length > 0 && hForR.some(function (h) {
+          return (h.scoreA != null && h.scoreA !== '') || (h.scoreB != null && h.scoreB !== '');
         });
         return { round: Number(r.round), matchCount: matchCount, committed: committed, matches: matchesOut };
       });
@@ -1751,18 +1760,36 @@
       var all = await window.store.getAll('members');
 
       // 同ラウンド内で既に出場中のメンバーを集計（自分の試合の他スロット + 他の試合全体）
-      // 自分自身（slot 位置の currentName）は当然「他スロット」ではないので除外しない
+      // 2026-05-27 3エージェント独立分析 修正1:
+      //   バグ:「currentName と同名のメンバーが別試合に出ている場合、本人スロットを書き換える
+      //         つもりで開いたモーダルでも usedInRound[currentName]=true になり、
+      //         同チーム同性別の他メンバーが候補に出ず、本人だけが候補に残る」状態だった。
+      //   原因: 「i === idx && s === slot」のスキップは本人の "スロット位置1点" を外すだけで、
+      //         同名メンバー(=同チーム別ペア・別ラウンド由来の重複)が別試合スロットに居れば
+      //         currentName が usedInRound に積まれてしまう。
+      //   修正: 集計時に「n === currentName」を弾く + 念のため後段で delete usedInRound[currentName]
+      //         の二段防御。これにより本人(currentName)は決して usedInRound に入らない。
       var usedInRound = {};
       r.matches.forEach(function (mm, i) {
         ['a1', 'a2', 'b1', 'b2'].forEach(function (s) {
-          if (i === idx && s === slot) return;  // 自分自身は除外しない（=候補に残しはしないが usedInRound に入れない）
+          if (i === idx && s === slot) return;  // 自分自身のスロット位置
           var n = mm && mm[s];
-          if (n) usedInRound[n] = true;
+          if (!n) return;
+          if (n === currentName) return;  // 同名メンバーは本人扱いで usedInRound に入れない
+          usedInRound[n] = true;
         });
       });
+      // 二段防御: 万一のロジック変更でも本人は usedInRound に残らないよう明示削除
+      if (currentName) delete usedInRound[currentName];
 
+      // 2026-05-27 3エージェント独立分析 修正3:
+      //   候補リストから本人を除外する。「変更しないなら開く必要ない」というUX。
+      //   旧仕様では (現在) マーカーで本人も列挙していたが、
+      //   「候補一覧に自分しか出ない=変更先がない」と「候補に自分+他人が並ぶ」の差が
+      //   ユーザーに伝わらず、混乱の元だったため。
       var candidates = all.filter(function (p) {
         if (!p || !p.name) return false;
+        if (p.name === currentName) return false;  // 本人は候補から除外
         if (p.team !== teamSide) return false;
         if (expectedGender && p.gender !== expectedGender) return false;
         if (usedInRound[p.name]) return false;
@@ -1787,18 +1814,23 @@
       title.textContent = (currentName || '(空き)') + ' → 誰に変更しますか?';
 
       if (candidates.length === 0) {
-        list.innerHTML = '<li class="candidate-empty">該当する候補メンバーがいません（同ラウンド既出 or 性別・チーム不一致）</li>';
+        // 2026-05-27 3エージェント独立分析 修正4:
+        //   候補ゼロ時のヒントを「変更先のメンバーがいません」+原因併記に変更。
+        //   - 「同ラウンドで全員出場中」「性別/チーム該当者なし」をユーザーに明示。
+        list.innerHTML = '<li class="candidate-empty" style="padding:20px;text-align:center;color:#666;">'
+          + '変更先のメンバーがいません<br>'
+          + '<span style="font-size:12px;">(同ラウンドで全員出場中・性別/チーム該当者なし)</span>'
+          + '</li>';
       } else {
         list.innerHTML = candidates.map(function (p) {
           var total = plannedCounts[p.name] ? plannedCounts[p.name].total : 0;
           var meta = (p.gender || '') + ' / 予定' + total + '試合';
-          // currentName 自身も候補に出る場合は (現在) と表示。安全のためタップ可能のまま残す
-          var marker = (p.name === currentName) ? ' (現在)' : '';
+          // 2026-05-27 修正3 で本人は filter で除外済み。(現在) マーカーは不要になった。
           return '<li role="button" tabindex="0"' +
             ' data-cand-name="' + escapeHtml(p.name) + '"' +
             ' onclick="confirmMemberSwap(this.getAttribute(\'data-cand-name\'))"' +
             ' onkeydown="handleCandidateKey(event, this);">' +
-            '<span class="candidate-name">' + escapeHtml(p.name) + escapeHtml(marker) + '</span>' +
+            '<span class="candidate-name">' + escapeHtml(p.name) + '</span>' +
             '<span class="candidate-meta">' + escapeHtml(meta) + '</span>' +
             '</li>';
         }).join('');
