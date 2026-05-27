@@ -23,10 +23,10 @@
 //   - 2026-05-27 v3: 3エージェント独立分析 (mobile-developer/frontend-developer/qa-engineer)
 //     による真因4点修正 (pointer-events:none / .rc-pair padding+margin / hashchange close /
 //     catch touchAction クリア) に伴いバンプ。旧キャッシュ強制更新。
-//   - 2026-05-27 v4: swap モーダル候補2大バグ修正 (usedInRound 同名重複除外 +
-//     dbGetRounds idx を r.matches 実 idx に修正 + 本人候補除外 + 候補ゼロUX) に伴いバンプ。
+//   - 2026-05-27 v5: メンバー差し替えモーダルの候補フィルタ大幅撤廃
+//     (チーム/性別/同ラウンド既出場フィルタ撤廃・本人除外のみ維持・チーム性別hint併記) に伴いバンプ。
 
-const CACHE_NAME = 'tennis-offline-v4-20260527';
+const CACHE_NAME = 'tennis-offline-v5-20260527';
 
 // precache 対象（manifest と同じ相対パス・全て同一フォルダ配下）
 const ASSETS = [

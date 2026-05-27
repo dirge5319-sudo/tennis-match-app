@@ -1728,22 +1728,9 @@
       }
     }
 
-    // 試合タイプとスロットから期待性別を導出
-    //   - 男子ダブルス / 女子ダブルス / シングルス（男）/ シングルス（女）は性別固定
-    //   - ミックスダブルス は slot ごとに固定 (a1/b1=男, a2/b2=女)
-    //   - それ以外（未知 type）は null を返し、フィルタしない（後方互換）
-    function _expectedGenderForSlot(type, slot) {
-      var t = String(type || '');
-      if (t === '男子ダブルス') return '男';
-      if (t === '女子ダブルス') return '女';
-      if (t === 'シングルス（男）') return '男';
-      if (t === 'シングルス（女）') return '女';
-      if (t === 'ミックスダブルス') {
-        if (slot === 'a1' || slot === 'b1') return '男';
-        if (slot === 'a2' || slot === 'b2') return '女';
-      }
-      return null;
-    }
+    // 2026-05-27 オーナー指示で候補フィルタを大幅撤廃したため、_expectedGenderForSlot は不要になり削除。
+    //   旧ロジックは openMemberSwapModal の slot 別性別フィルタに使われていたが、
+    //   今は「本人だけ除外」運用に変更されている。
 
     async function openMemberSwapModal(round, idx, slot, currentName) {
       // 該当ラウンドを取得
@@ -1752,52 +1739,32 @@
         alert('対象の試合が見つかりませんでした');
         return;
       }
-      var m = r.matches[idx];
       var teamSide = (slot === 'a1' || slot === 'a2') ? 'A' : 'B';
-      var expectedGender = _expectedGenderForSlot(m.type, slot);
 
       // 全メンバーから候補抽出
       var all = await window.store.getAll('members');
 
-      // 同ラウンド内で既に出場中のメンバーを集計（自分の試合の他スロット + 他の試合全体）
-      // 2026-05-27 3エージェント独立分析 修正1:
-      //   バグ:「currentName と同名のメンバーが別試合に出ている場合、本人スロットを書き換える
-      //         つもりで開いたモーダルでも usedInRound[currentName]=true になり、
-      //         同チーム同性別の他メンバーが候補に出ず、本人だけが候補に残る」状態だった。
-      //   原因: 「i === idx && s === slot」のスキップは本人の "スロット位置1点" を外すだけで、
-      //         同名メンバー(=同チーム別ペア・別ラウンド由来の重複)が別試合スロットに居れば
-      //         currentName が usedInRound に積まれてしまう。
-      //   修正: 集計時に「n === currentName」を弾く + 念のため後段で delete usedInRound[currentName]
-      //         の二段防御。これにより本人(currentName)は決して usedInRound に入らない。
-      var usedInRound = {};
-      r.matches.forEach(function (mm, i) {
-        ['a1', 'a2', 'b1', 'b2'].forEach(function (s) {
-          if (i === idx && s === slot) return;  // 自分自身のスロット位置
-          var n = mm && mm[s];
-          if (!n) return;
-          if (n === currentName) return;  // 同名メンバーは本人扱いで usedInRound に入れない
-          usedInRound[n] = true;
-        });
-      });
-      // 二段防御: 万一のロジック変更でも本人は usedInRound に残らないよう明示削除
-      if (currentName) delete usedInRound[currentName];
-
-      // 2026-05-27 3エージェント独立分析 修正3:
-      //   候補リストから本人を除外する。「変更しないなら開く必要ない」というUX。
-      //   旧仕様では (現在) マーカーで本人も列挙していたが、
-      //   「候補一覧に自分しか出ない=変更先がない」と「候補に自分+他人が並ぶ」の差が
-      //   ユーザーに伝わらず、混乱の元だったため。
+      // 2026-05-27 オーナー指示 (候補フィルタ大幅緩和):
+      //   旧仕様ではチーム/性別/同ラウンド既出場 でフィルタしていたが、
+      //   ラウンドずれ・大規模編集が普通に起きるため、これらの制約をすべて撤廃。
+      //   - チーム横断OK (Aの試合に B のメンバーを入れてもよい)
+      //   - 性別不問OK (男ダブに女性を入れてもよい)
+      //   - 同ラウンド内 重複出場 OK (同じ人が同ラウンドの2試合に出てもよい)
+      //   - 維持する制約は「本人 (currentName) 除外」のみ
+      //   表示順は UX のため「同チーム → 異チーム」「同チーム内は名前順」に並べる。
       var candidates = all.filter(function (p) {
         if (!p || !p.name) return false;
-        if (p.name === currentName) return false;  // 本人は候補から除外
-        if (p.team !== teamSide) return false;
-        if (expectedGender && p.gender !== expectedGender) return false;
-        if (usedInRound[p.name]) return false;
+        if (p.name === currentName) return false;  // 本人だけは候補から除外
         return true;
       });
 
-      // 候補は名前順（読みやすさ）
-      candidates.sort(function (a, b) { return String(a.name).localeCompare(String(b.name), 'ja'); });
+      // 並び順: 同チーム優先 → チーム内は名前順
+      candidates.sort(function (a, b) {
+        var aSameTeam = (a.team === teamSide) ? 0 : 1;
+        var bSameTeam = (b.team === teamSide) ? 0 : 1;
+        if (aSameTeam !== bSameTeam) return aSameTeam - bSameTeam;
+        return String(a.name || '').localeCompare(String(b.name || ''), 'ja');
+      });
 
       // 各候補の予定試合数を集計（全 rounds 横断）
       var plannedCounts;
@@ -1814,18 +1781,24 @@
       title.textContent = (currentName || '(空き)') + ' → 誰に変更しますか?';
 
       if (candidates.length === 0) {
-        // 2026-05-27 3エージェント独立分析 修正4:
-        //   候補ゼロ時のヒントを「変更先のメンバーがいません」+原因併記に変更。
-        //   - 「同ラウンドで全員出場中」「性別/チーム該当者なし」をユーザーに明示。
+        // 2026-05-27 オーナー指示 (候補フィルタ撤廃版):
+        //   フィルタを撤廃したため候補ゼロになるのは「本人以外メンバーが登録されていない」場合のみ。
+        //   表示文言を実態に合わせて簡素化する。
         list.innerHTML = '<li class="candidate-empty" style="padding:20px;text-align:center;color:#666;">'
           + '変更先のメンバーがいません<br>'
-          + '<span style="font-size:12px;">(同ラウンドで全員出場中・性別/チーム該当者なし)</span>'
+          + '<span style="font-size:12px;">(本人以外のメンバーが登録されていません)</span>'
           + '</li>';
       } else {
         list.innerHTML = candidates.map(function (p) {
           var total = plannedCounts[p.name] ? plannedCounts[p.name].total : 0;
-          var meta = (p.gender || '') + ' / 予定' + total + '試合';
-          // 2026-05-27 修正3 で本人は filter で除外済み。(現在) マーカーは不要になった。
+          // 2026-05-27 オーナー指示: チーム/性別を併記して "誰がどのチーム・性別か" を一目で分かる UI に
+          //   例: (A・男) / 予定3試合   (B・女) / 予定2試合
+          var teamLabel = (p.team === 'A' || p.team === 'B') ? p.team : '';
+          var genderLabel = p.gender || '';
+          var hint = (teamLabel || genderLabel)
+            ? '(' + teamLabel + (teamLabel && genderLabel ? '・' : '') + genderLabel + ')'
+            : '';
+          var meta = (hint ? hint + ' / ' : '') + '予定' + total + '試合';
           return '<li role="button" tabindex="0"' +
             ' data-cand-name="' + escapeHtml(p.name) + '"' +
             ' onclick="confirmMemberSwap(this.getAttribute(\'data-cand-name\'))"' +
